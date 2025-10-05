@@ -7,8 +7,15 @@ import 'dart:ui' as ui;
 import 'dart:convert';
 import '../services/pdf_api_service.dart';
 import '../models/document_info.dart';
+import 'dart:math' as math;
 
-//getting better but is not perfect yet
+
+//very bad
+
+enum PdfViewMode {
+  singlePage,    // View one page at a time
+  multiplePages  // View multiple pages in scroll
+}
 
 class PdfViewerConfig {
   final int cacheSize;
@@ -19,6 +26,9 @@ class PdfViewerConfig {
   final bool enablePerformanceMonitoring;
   final bool enableAutoRetry;
   final bool enableDebugLogging;
+  final PdfViewMode viewMode;
+  final int preloadPagesAhead;
+  final int preloadPagesBehind;
 
   const PdfViewerConfig({
     this.cacheSize = 10,
@@ -29,6 +39,9 @@ class PdfViewerConfig {
     this.enablePerformanceMonitoring = true,
     this.enableAutoRetry = true,
     this.enableDebugLogging = false,
+    this.viewMode = PdfViewMode.multiplePages,
+    this.preloadPagesAhead = 3,
+    this.preloadPagesBehind = 3,
   });
 }
 
@@ -192,6 +205,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   int _currentPage = 1;
   final Set<int> _loadedPages = {};
   double _zoomLevel = 1.0;
+  PdfViewMode _currentViewMode = PdfViewMode.multiplePages;
 
   // PDF.js specific
   late html.IFrameElement _iframeElement;
@@ -245,6 +259,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       baseUrl: widget.apiBaseUrl ?? AppConfig.baseUrl,
     );
 
+    _currentViewMode = widget.config.viewMode;
     _performanceMonitor.startSession();
     _initializePdfViewer();
     _loadDocument();
@@ -453,6 +468,16 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         case 'lowMemory':
           _handleLowMemory();
           break;
+
+        case 'pageRendered':
+          final page = data['page'];
+          if (page != null) {
+            final pageNum = page is int ? page : int.tryParse(page.toString());
+            if (pageNum != null) {
+              _debugLog('Page $pageNum rendered successfully');
+            }
+          }
+          break;
       }
     } catch (e) {
       print('Error handling PDF.js message: $e');
@@ -564,18 +589,14 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       _loadAndSendPage(pageNum);
     }
 
-    // REDUCED: Hanya preload 1 halaman ke depan/belakang untuk dokumen besar
-    if (_documentInfo != null && _documentInfo!.totalPages > 100) {
-      _preloadNearbyPagesReduced(pageNum);
-    } else {
-      _preloadNearbyPages(pageNum);
-    }
+    // Smart preloading based on view mode and document size
+    _smartPreloadPages(pageNum);
 
     _cleanupDistantPages(pageNum);
     _debugMemoryLog();
   }
 
-  void _preloadNearbyPagesReduced(int currentPage) {
+  void _smartPreloadPages(int currentPage) {
     if (_documentInfo == null) return;
 
     // Only check scroll prevention if we're CURRENTLY scrolling
@@ -589,7 +610,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       return;
     }
 
-    // REDUCED: Hanya 1 halaman depan/belakang untuk dokumen besar
     final pagesToLoad = <int>[];
 
     // Current page first
@@ -597,20 +617,30 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       pagesToLoad.add(currentPage);
     }
 
-    // Only next page
-    final nextPage = currentPage + 1;
-    if (nextPage <= _documentInfo!.totalPages &&
-        !_pageCache.contains(nextPage) &&
-        !_loadingPages.contains(nextPage)) {
-      pagesToLoad.add(nextPage);
-    }
+    // Preload based on view mode and configuration
+    if (_currentViewMode == PdfViewMode.multiplePages) {
+      // Preload pages ahead
+      for (int i = 1; i <= widget.config.preloadPagesAhead; i++) {
+        final nextPage = currentPage + i;
+        if (nextPage <= _documentInfo!.totalPages &&
+            !_pageCache.contains(nextPage) &&
+            !_loadingPages.contains(nextPage)) {
+          pagesToLoad.add(nextPage);
+        }
+      }
 
-    // Only previous page
-    final prevPage = currentPage - 1;
-    if (prevPage >= 1 &&
-        !_pageCache.contains(prevPage) &&
-        !_loadingPages.contains(prevPage)) {
-      pagesToLoad.add(prevPage);
+      // Preload pages behind
+      for (int i = 1; i <= widget.config.preloadPagesBehind; i++) {
+        final prevPage = currentPage - i;
+        if (prevPage >= 1 &&
+            !_pageCache.contains(prevPage) &&
+            !_loadingPages.contains(prevPage)) {
+          pagesToLoad.add(prevPage);
+        }
+      }
+    } else {
+      // Single page mode - only load current page
+      // No additional preloading
     }
 
     for (final page in pagesToLoad) {
@@ -618,7 +648,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     }
 
     if (pagesToLoad.isNotEmpty) {
-      print('Preloading (reduced) ${pagesToLoad.length} pages around page $currentPage');
+      print('Smart preloading ${pagesToLoad.length} pages around page $currentPage');
     }
   }
 
@@ -732,14 +762,15 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     }).toList() ?? [];
 
     final pageDimensionsJsonString = jsonEncode(pageDimensionsJson);
+    final viewModeString = _currentViewMode == PdfViewMode.singlePage ? 'singlePage' : 'multiplePages';
 
-    final htmlContent = r'''
+    final htmlContent = '''
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes">
-  <title>''' + widget.title + r'''</title>
+  <title>${widget.title}</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs" type="module"></script>
   <style>
     * {
@@ -765,6 +796,16 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       scroll-behavior: smooth;
       padding: 0;
     }
+    .single-page-view #pdf-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+    }
+    .multiple-pages-view #pdf-container {
+      display: block;
+      overflow: auto;
+    }
     #pages-wrapper {
       display: flex;
       flex-direction: column;
@@ -772,12 +813,11 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       padding: 20px 0;
       gap: 20px;
       min-width: min-content;
-      transform-origin: center top;
-      backface-visibility: hidden;
-      -webkit-backface-visibility: hidden;
-      perspective: 1000px;
-      -webkit-perspective: 1000px;
-      transition: transform 0.1s ease-out;
+    }
+    .single-page-view #pages-wrapper {
+      padding: 0;
+      height: 100%;
+      justify-content: center;
     }
     .page-container {
       position: relative;
@@ -787,19 +827,16 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       align-items: center;
       justify-content: center;
       margin: 0 auto;
-      max-width: 100%;
-      overflow: hidden;
     }
     .page-container.loading {
       background: #f5f5f5;
+      min-height: 200px;
+      min-width: 200px;
     }
-    canvas {
+    .page-canvas {
       display: block;
-      background: white;
       max-width: 100%;
       height: auto;
-      image-rendering: -webkit-optimize-contrast;
-      image-rendering: crisp-edges;
     }
     .page-number {
       position: absolute;
@@ -812,12 +849,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       font-size: 12px;
       font-weight: 500;
       z-index: 10;
-    }
-    .loading-spinner {
-      color: #666;
-      font-size: 14px;
-      padding: 20px;
-      text-align: center;
     }
     .page-indicator {
       position: fixed;
@@ -850,63 +881,36 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       font-size: 12px;
       opacity: 0.8;
     }
-    .scroll-speed-indicator {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      background: rgba(255, 87, 34, 0.9);
-      color: white;
-      padding: 8px 12px;
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      opacity: 0;
-      transition: opacity 0.3s ease;
-      pointer-events: none;
-      z-index: 1001;
-    }
-    .scroll-speed-indicator.visible {
-      opacity: 1;
-    }
-    .zoom-indicator {
-      position: fixed;
-      top: 20px;
-      left: 20px;
-      background: rgba(0, 0, 0, 0.85);
-      color: white;
-      padding: 8px 12px;
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      opacity: 0;
-      transition: opacity 0.3s ease;
-      pointer-events: none;
-      z-index: 1001;
-    }
-    .zoom-indicator.visible {
-      opacity: 1;
-    }
-    .memory-warning {
-      position: fixed;
+    
+    /* Enhanced loading spinner */
+    .enhanced-spinner {
+      position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      background: rgba(255, 152, 0, 0.95);
-      color: white;
-      padding: 16px 24px;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-      opacity: 0;
-      transition: opacity 0.3s ease;
-      pointer-events: none;
-      z-index: 1002;
+      z-index: 5;
       text-align: center;
     }
-    .memory-warning.visible {
-      opacity: 1;
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #3498db;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto;
     }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .loading-text {
+      margin-top: 10px;
+      color: #666;
+      font-size: 14px;
+      text-align: center;
+    }
+    
     @media (max-width: 768px) {
       .page-indicator {
         right: 20px;
@@ -915,41 +919,31 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       .page-indicator .current {
         font-size: 20px;
       }
-      #pages-wrapper {
+      .multiple-pages-view #pages-wrapper {
         padding: 10px 0;
         gap: 10px;
       }
     }
   </style>
 </head>
-<body>
+<body class="${viewModeString}-view">
   <div id="pdf-container" role="main" aria-label="PDF Document">
     <div id="pages-wrapper"></div>
   </div>
   <div id="page-indicator" class="page-indicator" role="status" aria-live="polite" aria-atomic="true">
     <span class="current" id="current-page">1</span>
-    <span class="total">of 1</span>
-  </div>
-  <div id="scroll-speed-indicator" class="scroll-speed-indicator" role="alert" aria-live="assertive">
-    Fast Scrolling - Loading Paused
-  </div>
-  <div id="zoom-indicator" class="zoom-indicator" role="alert" aria-live="assertive">
-    Zooming - Scroll Disabled
-  </div>
-  <div id="memory-warning" class="memory-warning" role="alert" aria-live="assertive">
-    Low Memory - Clearing Cache
+    <span class="total">of ${_documentInfo!.totalPages}</span>
   </div>
 
   <script type="module">
     const pdfjsLib = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs');
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.mjs';
 
-    // Mobile detection and memory optimization
+    // Mobile detection
     const isAndroid = /Android/i.test(navigator.userAgent);
     const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
     const isMobile = isAndroid || isIOS;
     
-    // Use lower pixel ratio for better performance during zoom
     const basePixelRatio = window.devicePixelRatio || 1;
     const pixelRatio = isMobile ? Math.min(basePixelRatio, 1.5) : basePixelRatio;
 
@@ -961,856 +955,493 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
     console.log('Device detected:', { isAndroid, isIOS, isMobile, pixelRatio, maxZoom });
 
-    const container = document.getElementById('pdf-container');
-    const pagesWrapper = document.getElementById('pages-wrapper');
-    
     let scale = 1.0;
     let currentPage = 1;
-    const totalPages = ''' + _documentInfo!.totalPages.toString() + r''';
-    const pageDimensions = ''' + pageDimensionsJsonString + r''';
-    const pageData = new Map();
-    const pageElements = new Map();
-    const loadingPages = new Set();
+    const totalPages = ${_documentInfo!.totalPages};
+    const pageDimensions = ${pageDimensionsJsonString};
+    let currentViewMode = '${viewModeString}';
+    
+    const container = document.getElementById('pdf-container');
+    const pagesWrapper = document.getElementById('pages-wrapper');
+    const body = document.body;
     const pageIndicator = document.getElementById('page-indicator');
     const pageIndicatorCurrent = pageIndicator.querySelector('.current');
     const pageIndicatorTotal = pageIndicator.querySelector('.total');
-    const scrollSpeedIndicator = document.getElementById('scroll-speed-indicator');
-    const zoomIndicator = document.getElementById('zoom-indicator');
-    const memoryWarning = document.getElementById('memory-warning');
     
-    let scrollTimeout = null;
-    let isScrolling = false;
+    const pageElements = new Map();
+    const loadingPages = new Set();
+    const renderedPages = new Map(); // Store PDF page objects
+    const pdfDocuments = new Map(); // Store PDF documents for each page
+    
     let scrollStopTimeout = null;
-    const SCROLL_STOP_DELAY = 600;
-    
-    let isZooming = false;
-    let zoomEndTime = 0;
-    const SCROLL_PREVENTION_DURATION = isMobile ? 2000 : 1000;
-    
-    // FIXED: Improved zoom state management
-    let zoomThrottle = null;
-    let pendingZoomScale = null;
-    let lastRenderScale = 1.0;
-    let isRendering = false;
-    let renderQueue = new Set();
+    const SCROLL_STOP_DELAY = 150;
 
-    // FIXED: Improved current page tracking
-    let lastReportedPage = 1;
-    let pageUpdateThrottle = null;
-    
-    // FIXED: Continuous zoom state
-    let continuousZoomTarget = null;
-    let continuousZoomAnimation = null;
-    const ZOOM_ANIMATION_DURATION = 300;
-    
     function init() {
       console.log('Initializing viewer with', totalPages, 'pages');
+      console.log('View mode:', currentViewMode);
       console.log('Page dimensions available:', pageDimensions.length, 'pages');
       
-      // Calculate optimal initial scale based on container width
-      const containerWidth = container.clientWidth;
-      const baseScale = calculateOptimalScale();
-      scale = baseScale;
+      // Calculate optimal initial scale
+      const optimalScale = calculateOptimalScale();
+      scale = optimalScale;
+      console.log('Initial scale:', optimalScale);
       
+      // Create page containers
       for (let i = 1; i <= totalPages; i++) {
-        const pageContainer = document.createElement('div');
-        pageContainer.className = 'page-container loading';
-        pageContainer.id = 'page-' + i;
-        pageContainer.dataset.pageNumber = i.toString();
-        
-        const pageDim = pageDimensions.find(p => p.pageNumber === i);
-        if (pageDim) {
-          const { displayWidth, displayHeight } = calculatePageSize(pageDim, baseScale);
-          
-          pageContainer.style.width = displayWidth + 'px';
-          pageContainer.style.height = displayHeight + 'px';
-          pageContainer.style.minHeight = 'auto';
-          pageContainer.style.maxHeight = 'none';
-          
-          console.log('Page', i, 'pre-sized:', displayWidth.toFixed(0), 'x', displayHeight.toFixed(0), 'px');
-        } else {
-          pageContainer.style.width = '100%';
-          pageContainer.style.height = 'auto';
-          pageContainer.style.minHeight = '400px';
-          console.warn('No dimension data for page', i);
-        }
-        
-        const spinner = document.createElement('div');
-        spinner.className = 'loading-spinner';
-        spinner.textContent = 'Loading page ' + i + '...';
-        pageContainer.appendChild(spinner);
-        
-        const pageNumber = document.createElement('div');
-        pageNumber.className = 'page-number';
-        pageNumber.textContent = i + ' / ' + totalPages;
-        pageContainer.appendChild(pageNumber);
-        
-        pagesWrapper.appendChild(pageContainer);
-        pageElements.set(i, { 
-          container: pageContainer, 
-          canvas: null, 
-          pdf: null, 
-          rendered: false,
-          dimensions: pageDim,
-          currentScale: baseScale,
-          renderScale: baseScale * pixelRatio
-        });
+        createPageElement(i, optimalScale);
       }
       
-      setupScrollListener();
-      setupZoomControls();
-      setupKeyboardControls();
+      // Set up event listeners
+      setupEventListeners();
       
-      console.log('Viewer ready with pre-sized pages');
-      window.parent.postMessage({ type: 'viewerReady' }, '*');
+      // Initialize page indicator
+      pageIndicatorTotal.textContent = 'of ' + totalPages;
+      updatePageIndicator(1);
+      
+      // Notify Flutter that viewer is ready
+      sendMessageToFlutter({ type: 'viewerReady' });
+      
+      // Load initial pages
+      loadInitialPages();
     }
-
+    
     function calculateOptimalScale() {
-      const containerWidth = container.clientWidth - 40;
       if (pageDimensions.length === 0) return 1.0;
       
+      const containerWidth = container.clientWidth - 40;
+      const containerHeight = container.clientHeight - 40;
       const firstPage = pageDimensions[0];
-      let pageWidthPt = firstPage.width;
       
-      if (firstPage.unit === 'mm') {
-        pageWidthPt = firstPage.width * 2.83465;
-      } else if (firstPage.unit === 'in') {
-        pageWidthPt = firstPage.width * 72;
+      const pageWidth = firstPage.width;
+      const pageHeight = firstPage.height;
+      
+      const widthScale = (containerWidth * 0.9) / pageWidth;
+      const heightScale = (containerHeight * 0.9) / pageHeight;
+      
+      let optimalScale = Math.min(widthScale, heightScale);
+      optimalScale = Math.max(0.5, Math.min(optimalScale, 3.0));
+      optimalScale = Math.round(optimalScale * 100) / 100;
+      
+      console.log('Scale calculation:', {
+        containerWidth, containerHeight,
+        pageWidth, pageHeight,
+        widthScale, heightScale,
+        optimalScale
+      });
+      
+      return optimalScale;
+    }
+    
+    function createPageElement(pageNum, initialScale) {
+      const pageContainer = document.createElement('div');
+      pageContainer.className = 'page-container loading';
+      pageContainer.id = 'page-' + pageNum;
+      pageContainer.dataset.pageNumber = pageNum.toString();
+      
+      const pageDim = pageDimensions.find(p => p.pageNumber === pageNum);
+      if (pageDim) {
+        const displayWidth = Math.floor(pageDim.width * initialScale);
+        const displayHeight = Math.floor(pageDim.height * initialScale);
+        
+        pageContainer.style.width = displayWidth + 'px';
+        pageContainer.style.height = displayHeight + 'px';
+        
+        console.log('Page', pageNum, 'size:', displayWidth + 'x' + displayHeight);
+      } else {
+        pageContainer.style.width = '100%';
+        pageContainer.style.height = '400px';
       }
       
-      const optimalScale = (containerWidth * 0.9) / pageWidthPt;
-      return Math.min(Math.max(optimalScale, 0.5), 2.0);
+      // Add loading spinner
+      const spinner = document.createElement('div');
+      spinner.className = 'enhanced-spinner';
+      spinner.innerHTML = \`
+        <div class="spinner"></div>
+        <div class="loading-text">Loading page \${pageNum}</div>
+      \`;
+      pageContainer.appendChild(spinner);
+      
+      pagesWrapper.appendChild(pageContainer);
+      pageElements.set(pageNum, pageContainer);
     }
-
-    function calculatePageSize(pageDim, currentScale) {
-      let widthPt = pageDim.width;
-      let heightPt = pageDim.height;
+    
+    function setupEventListeners() {
+      // Scroll events
+      container.addEventListener('scroll', handleScroll, { passive: true });
       
-      if (pageDim.unit === 'mm') {
-        widthPt = pageDim.width * 2.83465;
-        heightPt = pageDim.height * 2.83465;
-      } else if (pageDim.unit === 'in') {
-        widthPt = pageDim.width * 72;
-        heightPt = pageDim.height * 72;
-      }
-      
-      const displayWidth = widthPt * currentScale;
-      const displayHeight = heightPt * currentScale;
-      
-      return { displayWidth, displayHeight };
+      // Message events from Flutter
+      window.addEventListener('message', handleFlutterMessage);
     }
-
-    // FIXED: Improved page detection logic
-    function getCurrentVisiblePage() {
-      const containerRect = container.getBoundingClientRect();
-      const containerTop = containerRect.top;
-      const containerHeight = containerRect.height;
-      const viewportCenter = containerTop + (containerHeight / 2);
+    
+    function handleScroll() {
+      clearTimeout(scrollStopTimeout);
       
-      let bestCandidate = currentPage;
-      let smallestDistance = Infinity;
+      scrollStopTimeout = setTimeout(() => {
+        const finalPage = calculateCurrentPage();
+        sendMessageToFlutter({ 
+          type: 'scrollStopped', 
+          page: finalPage
+        });
+        updateCurrentPage(finalPage);
+      }, SCROLL_STOP_DELAY);
+      
+      // Update current page during scroll
+      updateCurrentPage();
+    }
+    
+    function calculateCurrentPage() {
+      const scrollTop = container.scrollTop;
+      const containerHeight = container.clientHeight;
+      const scrollCenter = scrollTop + (containerHeight / 2);
+      
+      let closestPage = 1;
+      let minDistance = Infinity;
       
       for (let i = 1; i <= totalPages; i++) {
-        const pageContainer = document.getElementById('page-' + i);
-        if (!pageContainer) continue;
+        const pageElement = pageElements.get(i);
+        if (!pageElement) continue;
         
-        const pageRect = pageContainer.getBoundingClientRect();
-        const pageCenter = pageRect.top + (pageRect.height / 2);
-        const distanceFromCenter = Math.abs(pageCenter - viewportCenter);
+        const pageTop = pageElement.offsetTop;
+        const pageBottom = pageTop + pageElement.offsetHeight;
+        const pageCenter = (pageTop + pageBottom) / 2;
         
-        if (distanceFromCenter < smallestDistance) {
-          smallestDistance = distanceFromCenter;
-          bestCandidate = i;
+        const distance = Math.abs(scrollCenter - pageCenter);
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestPage = i;
         }
       }
       
-      return bestCandidate;
+      return closestPage;
     }
-
-    // FIXED: Improved scroll handling to prevent page reloading during slow scroll
-    function setupScrollListener() {
-      let lastScrollTop = container.scrollTop;
-      let lastScrollTime = Date.now();
-      let scrollVelocity = 0;
-      let isFastScrolling = false;
-      const FAST_SCROLL_THRESHOLD = 100; // pixels per second
+    
+    function updateCurrentPage(forcePage = null) {
+      const page = forcePage || calculateCurrentPage();
       
-      // FIXED: Track visible pages to prevent unnecessary reloads
-      let currentlyVisiblePages = new Set();
-      let lastVisibleCheck = 0;
-      const VISIBLE_CHECK_INTERVAL = 200;
-      
-      function updateVisiblePages() {
-        const now = Date.now();
-        if (now - lastVisibleCheck < VISIBLE_CHECK_INTERVAL) return;
+      if (page !== currentPage && page >= 1 && page <= totalPages) {
+        currentPage = page;
+        updatePageIndicator(page);
+        sendMessageToFlutter({ type: 'pageInView', page: page });
         
-        lastVisibleCheck = now;
-        const newVisiblePages = getVisiblePages();
-        
-        // Only update if the visible pages have actually changed
-        if (newVisiblePages.length !== currentlyVisiblePages.size || 
-            !newVisiblePages.every(page => currentlyVisiblePages.has(page))) {
-          currentlyVisiblePages = new Set(newVisiblePages);
-        }
-      }
-      
-      container.addEventListener('scroll', () => {
-        const now = Date.now();
-        const scrollTop = container.scrollTop;
-        const delta = scrollTop - lastScrollTop;
-        const timeDelta = now - lastScrollTime;
-        
-        // Calculate scroll velocity
-        scrollVelocity = Math.abs(delta) / Math.max(timeDelta, 1) * 1000;
-        isFastScrolling = scrollVelocity > FAST_SCROLL_THRESHOLD;
-        
-        if (!isScrolling) {
-          isScrolling = true;
-          window.parent.postMessage({ 
-            type: 'scrollStateChanged', 
-            isScrolling: true,
-            isFastScrolling: isFastScrolling
-          }, '*');
-        }
-        
-        if (scrollStopTimeout) clearTimeout(scrollStopTimeout);
-        scrollStopTimeout = setTimeout(() => {
-          isScrolling = false;
-          const stoppedAtPage = getCurrentVisiblePage();
-          window.parent.postMessage({ 
-            type: 'scrollStopped', 
-            page: stoppedAtPage,
-            wasFastScrolling: isFastScrolling
-          }, '*');
-        }, SCROLL_STOP_DELAY);
-        
-        // Update current page during scroll
-        const newPage = getCurrentVisiblePage();
-        if (newPage !== currentPage) {
-          currentPage = newPage;
-          updatePageIndicator();
-          
-          if (pageUpdateThrottle) clearTimeout(pageUpdateThrottle);
-          pageUpdateThrottle = setTimeout(() => {
-            if (currentPage !== lastReportedPage) {
-              lastReportedPage = currentPage;
-              window.parent.postMessage({ 
-                type: 'pageInView', 
-                page: currentPage 
-              }, '*');
-            }
-          }, 100);
-        }
-        
-        // FIXED: Update visible pages without causing reloads
-        updateVisiblePages();
-        
-        lastScrollTop = scrollTop;
-        lastScrollTime = now;
-      });
-    }
-
-    // FIXED: Continuous zoom implementation
-    function setupZoomControls() {
-      let touchStartDistance = 0;
-      let initialScale = scale;
-      let lastZoomTime = 0;
-      const ZOOM_THROTTLE = 16; // ~60fps
-      
-      // FIXED: Use CSS transforms for smooth zooming without re-rendering
-      function applyVisualZoom(newScale) {
-        const visualScale = newScale / scale;
-        pagesWrapper.style.transform = 'scale(' + visualScale + ')';
-        pagesWrapper.style.transformOrigin = 'center top';
-      }
-      
-      // FIXED: Final zoom with proper re-rendering
-      function applyFinalZoom(newScale) {
-        console.log('Applying final zoom:', newScale);
-        
-        // Update scale
-        scale = newScale;
-        
-        // Reset transform
-        pagesWrapper.style.transform = 'scale(1)';
-        
-        // Update all page containers with new dimensions
-        updateAllPageSizes();
-        
-        // Re-render visible pages with new scale
-        const visiblePages = getVisiblePages();
-        visiblePages.forEach(pageNum => {
-          schedulePageRender(pageNum);
-        });
-        
-        // Update indicators
-        updatePageIndicator();
-        updateZoomIndicator();
-        
-        // Report zoom change
-        window.parent.postMessage({ 
-          type: 'zoomChanged', 
-          zoom: scale 
-        }, '*');
-        
-        // Force page re-check after zoom
-        setTimeout(() => {
-          const newPage = getCurrentVisiblePage();
-          if (newPage !== currentPage) {
-            currentPage = newPage;
-            updatePageIndicator();
-            window.parent.postMessage({ 
-              type: 'pageInView', 
-              page: currentPage 
-            }, '*');
-          }
-        }, 200);
-      }
-      
-      // FIXED: Continuous zoom animation
-      function animateZoomTo(targetScale) {
-        if (continuousZoomAnimation) {
-          cancelAnimationFrame(continuousZoomAnimation);
-        }
-        
-        const startScale = scale;
-        const startTime = performance.now();
-        const duration = ZOOM_ANIMATION_DURATION;
-        
-        function animate(currentTime) {
-          const elapsed = currentTime - startTime;
-          const progress = Math.min(elapsed / duration, 1);
-          
-          // Smooth easing function
-          const easeProgress = 1 - Math.pow(1 - progress, 3);
-          
-          const currentScale = startScale + (targetScale - startScale) * easeProgress;
-          
-          // Apply visual zoom during animation
-          applyVisualZoom(currentScale);
-          updateZoomIndicator();
-          
-          if (progress < 1) {
-            continuousZoomAnimation = requestAnimationFrame(animate);
-          } else {
-            // Animation complete, apply final zoom
-            applyFinalZoom(targetScale);
-            continuousZoomAnimation = null;
-          }
-        }
-        
-        continuousZoomAnimation = requestAnimationFrame(animate);
-      }
-      
-      // FIXED: Global zoom function accessible from Flutter
-      window.setZoom = function(newScale, isFinal = false, animate = true) {
-        const clampedScale = Math.max(minZoom, Math.min(maxZoom, newScale));
-        
-        if (continuousZoomAnimation) {
-          cancelAnimationFrame(continuousZoomAnimation);
-          continuousZoomAnimation = null;
-        }
-        
-        if (isFinal) {
-          if (animate && Math.abs(clampedScale - scale) > 0.1) {
-            // Use continuous animation for final zoom
-            animateZoomTo(clampedScale);
-          } else {
-            // Apply final zoom immediately
-            applyFinalZoom(clampedScale);
-          }
-        } else {
-          // Interactive zoom - use CSS transforms for immediate visual feedback
-          applyVisualZoom(clampedScale);
-          updateZoomIndicator();
-        }
-      };
-      
-      // Pinch zoom for touch devices
-      container.addEventListener('touchstart', (e) => {
-        if (e.touches.length === 2) {
-          e.preventDefault();
-          touchStartDistance = getDistance(e.touches[0], e.touches[1]);
-          initialScale = scale;
-          isZooming = true;
-          window.parent.postMessage({ 
-            type: 'zoomStateChanged', 
-            isZooming: true 
-          }, '*');
-          zoomIndicator.classList.add('visible');
-        }
-      });
-      
-      container.addEventListener('touchmove', (e) => {
-        if (e.touches.length === 2 && isZooming) {
-          e.preventDefault();
-          
-          const now = Date.now();
-          if (now - lastZoomTime < ZOOM_THROTTLE) {
-            return;
-          }
-          lastZoomTime = now;
-          
-          const currentDistance = getDistance(e.touches[0], e.touches[1]);
-          const newScale = initialScale * (currentDistance / touchStartDistance);
-          
-          window.setZoom(newScale, false); // Interactive zoom
-        }
-      });
-      
-      container.addEventListener('touchend', (e) => {
-        if (isZooming) {
-          isZooming = false;
-          zoomEndTime = Date.now();
-          window.parent.postMessage({ 
-            type: 'zoomStateChanged', 
-            isZooming: false 
-          }, '*');
-          zoomIndicator.classList.remove('visible');
-          
-          // Apply final zoom with animation
-          const currentDistance = e.touches.length === 2 ? getDistance(e.touches[0], e.touches[1]) : touchStartDistance;
-          const newScale = initialScale * (currentDistance / touchStartDistance);
-          window.setZoom(newScale, true, true);
-        }
-      });
-      
-      // Wheel zoom for desktop
-      container.addEventListener('wheel', (e) => {
-        if (e.ctrlKey || e.metaKey) {
-          e.preventDefault();
-          const now = Date.now();
-          
-          if (now - lastZoomTime < ZOOM_THROTTLE) {
-            return;
-          }
-          
-          const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-          const newScale = scale * zoomFactor;
-          
-          window.setZoom(newScale, false); // Interactive zoom
-          
-          // Schedule final zoom with animation
-          clearTimeout(zoomThrottle);
-          zoomThrottle = setTimeout(() => {
-            window.setZoom(newScale, true, true); // Final zoom with animation
-          }, 150);
-          
-          lastZoomTime = now;
-        }
-      });
-    }
-
-    function getDistance(touch1, touch2) {
-      const dx = touch1.clientX - touch2.clientX;
-      const dy = touch1.clientY - touch2.clientY;
-      return Math.sqrt(dx * dx + dy * dy);
-    }
-
-    function updateAllPageSizes() {
-      pageElements.forEach((pageElement, pageNum) => {
-        if (pageElement.dimensions) {
-          const { displayWidth, displayHeight } = calculatePageSize(pageElement.dimensions, scale);
-          
-          pageElement.container.style.width = displayWidth + 'px';
-          pageElement.container.style.height = displayHeight + 'px';
-          pageElement.currentScale = scale;
-        }
-      });
-    }
-
-    // FIXED: Improved visible pages detection to prevent reloads
-    function getVisiblePages() {
-      const visible = [];
-      const containerRect = container.getBoundingClientRect();
-      const buffer = 2000; // Larger buffer to prevent reloads during slow scroll
-      
-      for (let i = 1; i <= totalPages; i++) {
-        const pageContainer = document.getElementById('page-' + i);
-        if (!pageContainer) continue;
-        
-        const pageRect = pageContainer.getBoundingClientRect();
-        if (pageRect.bottom >= (containerRect.top - buffer) && 
-            pageRect.top <= (containerRect.bottom + buffer)) {
-          visible.push(i);
-        }
-      }
-      
-      return visible;
-    }
-
-    // FIXED: Improved rendering with queue system and prevention of unnecessary reloads
-    function schedulePageRender(pageNum) {
-      const pageElement = pageElements.get(pageNum);
-      if (!pageElement) return;
-      
-      // Don't re-render if the page is already rendered at the current scale
-      if (pageElement.rendered && Math.abs(pageElement.currentScale - scale) < 0.01) {
-        return;
-      }
-      
-      if (isRendering) {
-        renderQueue.add(pageNum);
-        return;
-      }
-      
-      renderQueue.add(pageNum);
-      processRenderQueue();
-    }
-
-    async function processRenderQueue() {
-      if (isRendering || renderQueue.size === 0) return;
-      
-      isRendering = true;
-      
-      const pageNum = Array.from(renderQueue)[0];
-      renderQueue.delete(pageNum);
-      
-      const pageElement = pageElements.get(pageNum);
-      if (pageElement && pageElement.pdf && pageElement.canvas) {
-        await rerenderPage(pageNum, pageElement.pdf, pageElement.canvas);
-      }
-      
-      isRendering = false;
-      
-      // Process next in queue
-      if (renderQueue.size > 0) {
-        setTimeout(processRenderQueue, 0);
+        // Load nearby pages when page changes
+        loadNearbyPages(page);
       }
     }
-
-    function setupKeyboardControls() {
-      document.addEventListener('keydown', (e) => {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-        
-        switch(e.key) {
-          case 'ArrowDown':
-          case 'ArrowRight':
-          case 'PageDown':
-            e.preventDefault();
-            navigateToPage(Math.min(currentPage + 1, totalPages));
-            break;
-          case 'ArrowUp':
-          case 'ArrowLeft':
-          case 'PageUp':
-            e.preventDefault();
-            navigateToPage(Math.max(currentPage - 1, 1));
-            break;
-          case 'Home':
-            e.preventDefault();
-            navigateToPage(1);
-            break;
-          case 'End':
-            e.preventDefault();
-            navigateToPage(totalPages);
-            break;
-          case '+':
-          case '=':
-            if (e.ctrlKey || e.metaKey) {
-              e.preventDefault();
-              const newScale = Math.min(maxZoom, scale + 0.1);
-              window.setZoom(newScale, true, true);
-            }
-            break;
-          case '-':
-            if (e.ctrlKey || e.metaKey) {
-              e.preventDefault();
-              const newScale = Math.max(minZoom, scale - 0.1);
-              window.setZoom(newScale, true, true);
-            }
-            break;
-          case '0':
-            if (e.ctrlKey || e.metaKey) {
-              e.preventDefault();
-              window.setZoom(1.0, true, true);
-            }
-            break;
-        }
-      });
-    }
-
-    function navigateToPage(pageNum) {
-      const pageContainer = document.getElementById('page-' + pageNum);
-      if (pageContainer) {
-        const containerRect = container.getBoundingClientRect();
-        const pageRect = pageContainer.getBoundingClientRect();
-        const scrollTop = pageRect.top - containerRect.top + container.scrollTop - 20;
-        
-        container.scrollTo({
-          top: scrollTop,
-          behavior: 'smooth'
-        });
-        
-        currentPage = pageNum;
-        updatePageIndicator();
-        window.parent.postMessage({ 
-          type: 'pageInView', 
-          page: currentPage 
-        }, '*');
-      }
-    }
-
-    function updatePageIndicator() {
-      pageIndicatorCurrent.textContent = currentPage;
-      pageIndicatorTotal.textContent = 'of ' + totalPages;
-      
+    
+    function updatePageIndicator(page) {
+      pageIndicatorCurrent.textContent = page;
       pageIndicator.classList.add('visible');
-      clearTimeout(pageIndicator.timeout);
-      pageIndicator.timeout = setTimeout(() => {
+      
+      clearTimeout(pageIndicator.hideTimeout);
+      pageIndicator.hideTimeout = setTimeout(() => {
         pageIndicator.classList.remove('visible');
       }, 2000);
     }
-
-    function updateZoomIndicator() {
-      zoomIndicator.textContent = 'Zoom: ' + Math.round(scale * 100) + '%';
-      zoomIndicator.classList.add('visible');
-      clearTimeout(zoomIndicator.timeout);
-      zoomIndicator.timeout = setTimeout(() => {
-        if (!isZooming) {
-          zoomIndicator.classList.remove('visible');
+    
+    function loadInitialPages() {
+      console.log('Loading initial pages');
+      // Load first page immediately
+      loadPage(1);
+      
+      // Preload nearby pages
+      if (currentViewMode === 'multiplePages') {
+        for (let i = 2; i <= Math.min(5, totalPages); i++) {
+          loadPage(i);
         }
-      }, 2000);
+      }
     }
-
-    function loadPage(pageNum, pageData) {
-      if (loadingPages.has(pageNum)) return;
+    
+    function loadNearbyPages(centerPage) {
+      if (currentViewMode !== 'multiplePages') return;
       
+      const preloadRange = 2;
+      for (let i = centerPage - preloadRange; i <= centerPage + preloadRange; i++) {
+        if (i >= 1 && i <= totalPages && i !== centerPage) {
+          loadPage(i);
+        }
+      }
+    }
+    
+    function loadPage(pageNum) {
+      if (pageNum < 1 || pageNum > totalPages) return;
+      if (loadingPages.has(pageNum) || renderedPages.has(pageNum)) return;
+      
+      console.log('Requesting page', pageNum);
       loadingPages.add(pageNum);
-      console.log('Loading page', pageNum);
-      
-      window.parent.postMessage({ 
-        type: 'requestPage', 
-        page: pageNum 
-      }, '*');
+      sendMessageToFlutter({ type: 'requestPage', page: pageNum });
     }
-
-    // FIXED: Improved page rendering with better quality
-    function renderPage(pageNum, pdfPage, canvas) {
-      const pageElement = pageElements.get(pageNum);
-      if (!pageElement) return;
+    
+    async function renderPage(pageNum, pdfData) {
+      console.log('Rendering page', pageNum, 'with PDF data length:', pdfData.length);
       
-      const container = pageElement.container;
-      const dimensions = pageElement.dimensions;
-      
-      if (!dimensions) {
-        console.warn('No dimensions for page', pageNum);
+      if (!pageElements.has(pageNum)) {
+        console.error('Page element not found for page', pageNum);
         return;
       }
       
-      // Calculate the actual render scale
-      const renderScale = scale * pixelRatio;
-      pageElement.renderScale = renderScale;
+      const pageContainer = pageElements.get(pageNum);
       
-      const viewport = pdfPage.getViewport({ scale: renderScale });
-      
-      // Set canvas dimensions
-      canvas.width = Math.floor(viewport.width);
-      canvas.height = Math.floor(viewport.height);
-      canvas.style.width = Math.floor(viewport.width / pixelRatio) + 'px';
-      canvas.style.height = Math.floor(viewport.height / pixelRatio) + 'px';
-      
-      const context = canvas.getContext('2d', { 
-        alpha: false,
-        desynchronized: true // Better performance
-      });
-      
-      // Clear canvas with white background
-      context.fillStyle = 'white';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      
-      const renderContext = {
-        canvasContext: context,
-        viewport: viewport,
-        intent: 'display',
-        enableWebGL: false,
-        renderInteractiveForms: false
-      };
-      
-      const renderTask = pdfPage.render(renderContext);
-      
-      renderTask.promise.then(() => {
-        console.log('Rendered page', pageNum, 'at', Math.round(scale * 100) + '%');
-        
-        // Remove loading state
-        container.classList.remove('loading');
-        
-        // Remove spinner if exists
-        const spinner = container.querySelector('.loading-spinner');
+      try {
+        // Remove loading spinner
+        const spinner = pageContainer.querySelector('.enhanced-spinner');
         if (spinner) {
           spinner.remove();
         }
         
-        pageElement.rendered = true;
-        pageElement.currentScale = scale;
+        // Remove existing canvas if any
+        const existingCanvas = pageContainer.querySelector('.page-canvas');
+        if (existingCanvas) {
+          existingCanvas.remove();
+        }
         
-      }).catch(error => {
+        // Convert base64 to Uint8Array
+        const binaryString = atob(pdfData);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        
+        console.log('Loading PDF document for page', pageNum);
+        
+        // Load PDF document
+        const pdfDoc = await pdfjsLib.getDocument(bytes).promise;
+        pdfDocuments.set(pageNum, pdfDoc);
+        
+        // Get the first page (since each page is a separate PDF)
+        const pdfPage = await pdfDoc.getPage(1);
+        renderedPages.set(pageNum, pdfPage);
+        
+        // Create canvas
+        const canvas = document.createElement('canvas');
+        canvas.className = 'page-canvas';
+        
+        const pageDim = pageDimensions.find(p => p.pageNumber === pageNum);
+        if (pageDim) {
+          const displayWidth = Math.floor(pageDim.width * scale);
+          const displayHeight = Math.floor(pageDim.height * scale);
+          
+          // Set canvas dimensions for high DPI displays
+          const renderScale = scale * pixelRatio;
+          const viewport = pdfPage.getViewport({ scale: renderScale });
+          
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          canvas.style.width = displayWidth + 'px';
+          canvas.style.height = displayHeight + 'px';
+        }
+        
+        // Render PDF page to canvas
+        const renderContext = {
+          canvasContext: canvas.getContext('2d'),
+          viewport: pdfPage.getViewport({ scale: scale * pixelRatio }),
+        };
+        
+        console.log('Rendering PDF page', pageNum, 'at scale', scale);
+        
+        await pdfPage.render(renderContext).promise;
+        
+        pageContainer.appendChild(canvas);
+        pageContainer.classList.remove('loading');
+        loadingPages.delete(pageNum);
+        
+        // Add page number if not exists
+        if (!pageContainer.querySelector('.page-number')) {
+          const pageNumber = document.createElement('div');
+          pageNumber.className = 'page-number';
+          pageNumber.textContent = pageNum + ' / ' + totalPages;
+          pageContainer.appendChild(pageNumber);
+        }
+        
+        console.log('Page', pageNum, 'rendered successfully');
+        sendMessageToFlutter({ type: 'pageRendered', page: pageNum });
+        
+      } catch (error) {
         console.error('Error rendering page', pageNum, ':', error);
-        container.classList.remove('loading');
+        loadingPages.delete(pageNum);
         
+        // Show error message
         const errorMsg = document.createElement('div');
-        errorMsg.className = 'error-message';
-        errorMsg.textContent = 'Error loading page';
-        errorMsg.style.color = '#f44336';
+        errorMsg.style.color = 'red';
         errorMsg.style.padding = '20px';
         errorMsg.style.textAlign = 'center';
-        container.appendChild(errorMsg);
-      });
+        errorMsg.textContent = 'Failed to render page ' + pageNum + ': ' + error.message;
+        pageContainer.appendChild(errorMsg);
+        pageContainer.classList.remove('loading');
+      }
     }
-
-    // FIXED: Improved re-render for zoom changes
-    function rerenderPage(pageNum, pdfPage, canvas) {
-      const pageElement = pageElements.get(pageNum);
-      if (!pageElement || !pageElement.rendered) return;
+    
+    async function rerenderPage(pageNum) {
+      if (!renderedPages.has(pageNum)) return;
       
-      const renderScale = scale * pixelRatio;
+      const pageContainer = pageElements.get(pageNum);
+      const pdfPage = renderedPages.get(pageNum);
+      const canvas = pageContainer.querySelector('.page-canvas');
       
-      // Only re-render if scale change is significant
-      if (Math.abs(renderScale - pageElement.renderScale) < 0.1 && renderScale === pageElement.renderScale) {
-        return;
-      }
+      if (!canvas || !pdfPage) return;
       
-      pageElement.renderScale = renderScale;
-      const viewport = pdfPage.getViewport({ scale: renderScale });
-      
-      // Update canvas dimensions
-      const oldWidth = canvas.width;
-      const oldHeight = canvas.height;
-      const newWidth = Math.floor(viewport.width);
-      const newHeight = Math.floor(viewport.height);
-      
-      if (oldWidth !== newWidth || oldHeight !== newHeight) {
-        canvas.width = newWidth;
-        canvas.height = newHeight;
-        canvas.style.width = Math.floor(viewport.width / pixelRatio) + 'px';
-        canvas.style.height = Math.floor(viewport.height / pixelRatio) + 'px';
-      }
-      
-      const context = canvas.getContext('2d', { 
-        alpha: false,
-        desynchronized: true
-      });
-      
-      // Clear and re-render
-      context.fillStyle = 'white';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      
-      const renderContext = {
-        canvasContext: context,
-        viewport: viewport,
-        intent: 'display',
-        enableWebGL: false,
-        renderInteractiveForms: false
-      };
-      
-      return pdfPage.render(renderContext).promise.then(() => {
-        console.log('Re-rendered page', pageNum, 'at', Math.round(scale * 100) + '%');
-        pageElement.currentScale = scale;
-      }).catch(error => {
+      try {
+        const pageDim = pageDimensions.find(p => p.pageNumber === pageNum);
+        if (pageDim) {
+          const displayWidth = Math.floor(pageDim.width * scale);
+          const displayHeight = Math.floor(pageDim.height * scale);
+          
+          // Update canvas dimensions
+          const renderScale = scale * pixelRatio;
+          const viewport = pdfPage.getViewport({ scale: renderScale });
+          
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          canvas.style.width = displayWidth + 'px';
+          canvas.style.height = displayHeight + 'px';
+          
+          // Re-render with new scale
+          const renderContext = {
+            canvasContext: canvas.getContext('2d'),
+            viewport: viewport,
+          };
+          
+          await pdfPage.render(renderContext).promise;
+          console.log('Re-rendered page', pageNum, 'at scale', scale);
+        }
+      } catch (error) {
         console.error('Error re-rendering page', pageNum, ':', error);
-      });
+      }
     }
-
-    // Handle incoming page data from Flutter
-    window.addEventListener('message', (event) => {
+    
+    function handleFlutterMessage(event) {
       const data = event.data;
+      if (!data || !data.type) return;
       
-      if (data.type === 'sendPage') {
-        const pageNum = data.page;
-        const pageData = data.data;
-        
-        if (pageData && pageElements.has(pageNum)) {
-          console.log('Received data for page', pageNum, 'size:', pageData.length, 'bytes');
-          
-          const pageElement = pageElements.get(pageNum);
-          const container = pageElement.container;
-          
-          // Remove existing canvas if any
-          const existingCanvas = container.querySelector('canvas');
-          if (existingCanvas) {
-            existingCanvas.remove();
+      console.log('Received message from Flutter:', data.type);
+      
+      switch(data.type) {
+        case 'sendPage':
+          if (data.page && data.data) {
+            console.log('Processing PDF data for page', data.page);
+            renderPage(data.page, data.data);
+          } else {
+            console.error('Invalid sendPage data:', data);
           }
+          break;
           
-          // Create new canvas
-          const canvas = document.createElement('canvas');
-          canvas.style.width = '100%';
-          canvas.style.height = '100%';
-          container.appendChild(canvas);
-          
-          // Convert base64 to Uint8Array
-          const binaryString = atob(pageData);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
+        case 'navigateToPage':
+          if (data.page) {
+            const pageNum = parseInt(data.page);
+            if (pageNum >= 1 && pageNum <= totalPages) {
+              const pageElement = pageElements.get(pageNum);
+              if (pageElement) {
+                container.scrollTo({
+                  top: pageElement.offsetTop - 20,
+                  behavior: 'smooth'
+                });
+                currentPage = pageNum;
+                updatePageIndicator(pageNum);
+              }
+            }
           }
+          break;
           
-          // Load PDF page
-          pdfjsLib.getDocument(bytes).promise.then(pdf => {
-            return pdf.getPage(1);
-          }).then(pdfPage => {
-            pageElement.pdf = pdfPage;
-            pageElement.canvas = canvas;
-            renderPage(pageNum, pdfPage, canvas);
-          }).catch(error => {
-            console.error('Error loading PDF for page', pageNum, ':', error);
-          });
-          
-          loadingPages.delete(pageNum);
-        }
-      }
-      
-      if (data.type === 'navigateToPage') {
-        navigateToPage(data.page);
-      }
-      
-      if (data.type === 'setZoom') {
-        window.setZoom(data.zoom, true, true);
-      }
-      
-      if (data.type === 'getCurrentPage') {
-        const current = getCurrentVisiblePage();
-        window.parent.postMessage({ 
-          type: 'currentPageReport', 
-          page: current 
-        }, '*');
-      }
-      
-      if (data.type === 'clearCache') {
-        console.log('Clearing page cache');
-        for (let [pageNum, element] of pageElements) {
-          if (element.canvas) {
-            const context = element.canvas.getContext('2d');
-            context.clearRect(0, 0, element.canvas.width, element.canvas.height);
-            element.canvas.width = 0;
-            element.canvas.height = 0;
-            element.canvas.remove();
-            element.canvas = null;
+        case 'setZoom':
+          if (data.zoom !== undefined) {
+            console.log('Setting zoom to:', data.zoom);
+            scale = data.zoom;
+            updateAllPageSizes();
+            
+            // Re-render all visible pages with new zoom
+            rerenderVisiblePages();
           }
-          element.rendered = false;
-          element.container.classList.add('loading');
-        }
+          break;
+          
+        case 'changeViewMode':
+          if (data.viewMode) {
+            body.className = data.viewMode + '-view';
+            currentViewMode = data.viewMode;
+            console.log('View mode changed to:', data.viewMode);
+          }
+          break;
+          
+        case 'clearPage':
+          if (data.page) {
+            const pageElement = pageElements.get(data.page);
+            if (pageElement) {
+              const canvas = pageElement.querySelector('.page-canvas');
+              if (canvas) {
+                canvas.remove();
+              }
+              pageElement.classList.add('loading');
+              renderedPages.delete(data.page);
+              pdfDocuments.delete(data.page);
+            }
+          }
+          break;
+          
+        case 'getCurrentPage':
+          sendMessageToFlutter({ type: 'currentPageReport', page: currentPage });
+          break;
       }
-      
-      if (data.type === 'lowMemory') {
-        memoryWarning.textContent = 'Low Memory - Clearing Cache';
-        memoryWarning.classList.add('visible');
+    }
+    
+    function updateAllPageSizes() {
+      console.log('Updating all page sizes to scale:', scale);
+      for (let i = 1; i <= totalPages; i++) {
+        const pageContainer = pageElements.get(i);
+        const pageDim = pageDimensions.find(p => p.pageNumber === i);
         
-        setTimeout(() => {
-          memoryWarning.classList.remove('visible');
-        }, 3000);
-        
-        // Clear distant pages
-        for (let [pageNum, element] of pageElements) {
-          if (element.canvas && Math.abs(pageNum - currentPage) > 2) {
-            element.canvas.remove();
-            element.canvas = null;
-            element.rendered = false;
-            element.container.classList.add('loading');
+        if (pageContainer && pageDim) {
+          const displayWidth = Math.floor(pageDim.width * scale);
+          const displayHeight = Math.floor(pageDim.height * scale);
+          
+          pageContainer.style.width = displayWidth + 'px';
+          pageContainer.style.height = displayHeight + 'px';
+          
+          // Update canvas size if exists
+          const canvas = pageContainer.querySelector('.page-canvas');
+          if (canvas) {
+            canvas.style.width = displayWidth + 'px';
+            canvas.style.height = displayHeight + 'px';
           }
         }
       }
-    });
-
-    // Initialize when DOM is ready
+    }
+    
+    async function rerenderVisiblePages() {
+      const visiblePages = getVisiblePages();
+      console.log('Re-rendering visible pages:', visiblePages);
+      
+      for (const pageNum of visiblePages) {
+        if (renderedPages.has(pageNum)) {
+          await rerenderPage(pageNum);
+        }
+      }
+    }
+    
+    function getVisiblePages() {
+      const visiblePages = [];
+      const scrollTop = container.scrollTop;
+      const scrollBottom = scrollTop + container.clientHeight;
+      
+      for (let i = 1; i <= totalPages; i++) {
+        const pageElement = pageElements.get(i);
+        if (!pageElement) continue;
+        
+        const pageTop = pageElement.offsetTop;
+        const pageBottom = pageTop + pageElement.offsetHeight;
+        
+        if (pageBottom >= scrollTop && pageTop <= scrollBottom) {
+          visiblePages.push(i);
+        }
+      }
+      
+      return visiblePages;
+    }
+    
+    function sendMessageToFlutter(message) {
+      if (window.parent) {
+        window.parent.postMessage(message, '*');
+      }
+    }
+    
+    // Initialize when ready
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', init);
     } else {
@@ -1833,9 +1464,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   }
 
   void _setIframePointerEvents(bool enabled) {
-    if (_iframeElement.style != null) {
-      _iframeElement.style.pointerEvents = enabled ? 'auto' : 'none';
-    }
+    _iframeElement.style.pointerEvents = enabled ? 'auto' : 'none';
   }
 
   void _loadInitialPages() {
@@ -1844,221 +1473,204 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     // Load first page immediately
     _queuePageLoad(1, priority: true);
 
-    // Preload next few pages
-    for (int i = 2; i <= 3 && i <= _documentInfo!.totalPages; i++) {
-      _queuePageLoad(i);
+    // Preload nearby pages based on view mode
+    if (_currentViewMode == PdfViewMode.multiplePages) {
+      for (int i = 2; i <= math .min(3, _documentInfo!.totalPages); i++) {
+        _queuePageLoad(i);
+      }
     }
+
+    // Center page 1 after initial load
+    _centerPage1();
   }
 
-  void _queuePageLoad(int pageNum, {bool priority = false}) {
-    if (_loadingPages.contains(pageNum) || _pageCache.contains(pageNum)) {
+  void _centerPage1() {
+    // Wait for viewer to be ready and page to load
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted && _viewerInitialized) {
+        // Send message to JavaScript to center page 1
+        _iframeElement.contentWindow?.postMessage({
+          'type': 'centerPage1',
+        }, '*');
+
+        print('Centering page 1...');
+      }
+    });
+  }
+
+  void _queuePageLoad(int page, {bool priority = false}) {
+    if (_loadingPages.contains(page) || _pageCache.contains(page)) {
       return;
     }
 
     if (priority) {
-      _loadQueue.insert(0, pageNum);
+      _loadQueue.insert(0, page);
     } else {
-      _loadQueue.add(pageNum);
+      _loadQueue.add(page);
     }
 
     _processLoadQueue();
   }
 
-  void _processLoadQueue() async {
-    // Don't process during scroll prevention (except for current page)
-    if (_isScrollPrevented && !_loadQueue.contains(_currentPage)) {
+  void _processLoadQueue() {
+    if (_loadingPages.length >= widget.config.maxConcurrentLoads) {
       return;
     }
 
-    while (_loadingPages.length < widget.config.maxConcurrentLoads && _loadQueue.isNotEmpty) {
-      final pageNum = _loadQueue.removeAt(0);
-
-      if (!_pageCache.contains(pageNum) && !_loadingPages.contains(pageNum)) {
-        _loadingPages.add(pageNum);
-        _performanceMonitor.startPageLoad(pageNum);
-
-        try {
-          await _loadAndSendPage(pageNum);
-        } catch (e) {
-          print('Error loading page $pageNum: $e');
-          _loadingPages.remove(pageNum);
-          _handlePageLoadError(pageNum, e);
-        }
-      }
+    if (_loadQueue.isEmpty) {
+      return;
     }
+
+    final page = _loadQueue.removeAt(0);
+    _loadingPages.add(page);
+
+    _debugLog('Starting load for page $page (${_loadingPages.length} concurrent, ${_loadQueue.length} queued)');
+
+    _loadAndSendPage(page);
   }
 
   Future<void> _loadAndSendPage(int pageNum) async {
     if (!mounted) return;
 
+    _performanceMonitor.startPageLoad(pageNum);
+
     try {
-      final pageData = await _apiService.getPageAsPdf(
+      // This should return PDF data for the specific page
+      final pdfData = await _apiService.getPageAsPdf(
         widget.documentId,
         pageNum,
-      );
+      ).timeout(const Duration(seconds: 30));
 
       if (!mounted) return;
 
-      // Convert to base64 for sending to JavaScript
-      final base64Data = base64Encode(pageData);
+      _pageCache.put(pageNum, pdfData);
+      _loadedPages.add(pageNum);
+      _updatePageAccess(pageNum);
 
-      // Send to JavaScript
-      _iframeElement.contentWindow?.postMessage({
-        'type': 'sendPage',
-        'page': pageNum,
-        'data': base64Data,
-      }, '*');
+      // Send PDF data to JavaScript viewer
+      _sendPageToViewer(pageNum, pdfData);
 
-      // Cache the page data
-      _pageCache.put(pageNum, pageData);
-
-      _loadingPages.remove(pageNum);
       _performanceMonitor.endPageLoad(pageNum);
 
-      // Process next in queue
-      _processLoadQueue();
-
-      _debugLog('Loaded page $pageNum (${pageData.length} bytes)');
     } catch (e) {
+      print('Error loading page $pageNum: $e');
+      _handlePageLoadError(pageNum, e);
+    } finally {
       _loadingPages.remove(pageNum);
-      rethrow;
+      _processLoadQueue();
     }
   }
 
-  void _handlePageLoadError(int pageNum, dynamic error) {
+  void _sendPageToViewer(int pageNum, Uint8List pdfData) {
+    if (!_viewerInitialized) return;
+
+    final base64Data = base64Encode(pdfData);
+
+    _iframeElement.contentWindow?.postMessage({
+      'type': 'sendPage',
+      'page': pageNum,
+      'data': base64Data,
+    }, '*');
+
+    _debugLog('Sent PDF data for page $pageNum to viewer (${pdfData.length} bytes)');
+  }
+
+
+
+  void _handlePageLoadError(int page, dynamic error) {
     _errorCount++;
     _lastErrorTime = DateTime.now();
 
-    print('Failed to load page $pageNum: $error');
+    print('Page $page load error: $error (error count: $_errorCount)');
 
     // Auto-retry for transient errors
     if (widget.config.enableAutoRetry && _errorCount <= 3) {
-      Future.delayed(Duration(seconds: 1 * _errorCount), () {
-        if (mounted && !_pageCache.contains(pageNum) && !_loadingPages.contains(pageNum)) {
-          _queuePageLoad(pageNum, priority: true);
+      Future.delayed(Duration(seconds: _errorCount), () {
+        if (mounted && !_pageCache.contains(page)) {
+          _queuePageLoad(page);
         }
       });
     }
   }
 
-  void _preloadNearbyPages(int currentPage) {
-    if (_documentInfo == null) return;
-
-    // Don't preload during scroll prevention
-    if (_isScrollPrevented) {
-      return;
-    }
-
-    final pagesToLoad = <int>[];
-
-    // Current page first
-    if (!_pageCache.contains(currentPage) && !_loadingPages.contains(currentPage)) {
-      pagesToLoad.add(currentPage);
-    }
-
-    // Preload nearby pages
-    for (int i = 1; i <= widget.config.cacheWindowSize; i++) {
-      final nextPage = currentPage + i;
-      final prevPage = currentPage - i;
-
-      if (nextPage <= _documentInfo!.totalPages &&
-          !_pageCache.contains(nextPage) &&
-          !_loadingPages.contains(nextPage)) {
-        pagesToLoad.add(nextPage);
-      }
-
-      if (prevPage >= 1 &&
-          !_pageCache.contains(prevPage) &&
-          !_loadingPages.contains(prevPage)) {
-        pagesToLoad.add(prevPage);
-      }
-    }
-
-    for (final page in pagesToLoad) {
-      _queuePageLoad(page);
-    }
-
-    if (pagesToLoad.isNotEmpty) {
-      _debugLog('Preloading ${pagesToLoad.length} pages around page $currentPage');
-    }
+  void _updatePageAccess(int page) {
+    _pageAccessTimes[page] = DateTime.now();
+    _pageAccessOrder.remove(page);
+    _pageAccessOrder.add(page);
   }
 
   void _cleanupDistantPages(int currentPage) {
-    final pagesToRemove = _pageCache.getPagesToEvict(
+    final pagesToEvict = _pageCache.getPagesToEvict(
       currentPage,
-      widget.config.cacheWindowSize + 1,
+      widget.config.cacheWindowSize,
     );
 
-    for (final page in pagesToRemove) {
+    for (final page in pagesToEvict) {
       _removePageFromCache(page);
     }
 
-    if (pagesToRemove.isNotEmpty) {
-      _debugLog('Cleaned up ${pagesToRemove.length} distant pages');
+    if (pagesToEvict.isNotEmpty) {
+      _debugLog('Cleaned up ${pagesToEvict.length} distant pages');
     }
   }
 
-  void _removePageFromCache(int pageNum) {
-    _pageCache.remove(pageNum);
-    _pageAccessTimes.remove(pageNum);
-    _pageAccessOrder.remove(pageNum);
+  void _removePageFromCache(int page) {
+    _pageCache.remove(page);
+    _loadedPages.remove(page);
+    _pageAccessOrder.remove(page);
+    _pageAccessTimes.remove(page);
 
-    // Tell JavaScript to clear this page
-    _iframeElement.contentWindow?.postMessage({
-      'type': 'clearPage',
-      'page': pageNum,
-    }, '*');
-  }
-
-  void _updatePageAccess(int pageNum) {
-    _pageAccessTimes[pageNum] = DateTime.now();
-    _pageAccessOrder.remove(pageNum);
-    _pageAccessOrder.add(pageNum);
+    // Notify JavaScript to clear canvas
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'clearPage',
+        'page': page,
+      }, '*');
+    }
   }
 
   void _performPeriodicCleanup() {
     if (!mounted) return;
 
     final now = DateTime.now();
-    final cutoffTime = now.subtract(const Duration(minutes: 2));
+    final pagesToEvict = <int>[];
 
-    // Remove pages not accessed recently
-    final oldPages = _pageAccessTimes.entries
-        .where((entry) => entry.value.isBefore(cutoffTime))
-        .map((entry) => entry.key)
-        .toList();
+    for (final entry in _pageAccessTimes.entries) {
+      final page = entry.key;
+      final accessTime = entry.value;
 
-    for (final page in oldPages) {
-      if (page != _currentPage) {
-        _removePageFromCache(page);
+      if (now.difference(accessTime) > const Duration(minutes: 2)) {
+        pagesToEvict.add(page);
       }
     }
 
-    if (oldPages.isNotEmpty) {
-      _debugLog('Periodic cleanup: removed ${oldPages.length} old pages');
+    for (final page in pagesToEvict) {
+      _removePageFromCache(page);
     }
 
-    // Clean up access order list
-    if (_pageAccessOrder.length > 100) {
-      _pageAccessOrder.removeRange(0, _pageAccessOrder.length - 50);
+    if (pagesToEvict.isNotEmpty) {
+      _debugLog('Periodic cleanup: removed ${pagesToEvict.length} old pages');
     }
 
-    _debugMemoryLog();
+    // Force garbage collection if available
+    //_forceGarbageCollection();
   }
 
   void _monitorMemoryUsage() {
-    if (!mounted) return;
+    if (!widget.config.enablePerformanceMonitoring) return;
 
-    final totalMemory = _pageCache.totalMemory;
-    final memoryMB = totalMemory / (1024 * 1024);
+    final memoryMB = _pageCache.totalMemory / (1024 * 1024);
 
     if (memoryMB > widget.config.maxMemoryMB * 0.8) {
       _handleLowMemory();
     }
 
     // Log performance metrics periodically
-    final metrics = _performanceMonitor.getMetrics();
-    print('[PERFORMANCE] ${metrics}');
+    if (widget.config.enableDebugLogging) {
+      final metrics = _performanceMonitor.getMetrics();
+      print('Performance Metrics: $metrics');
+      _debugMemoryLog();
+    }
   }
 
   void _handleLowMemory() {
@@ -2069,7 +1681,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       _currentPage,
       _currentPage - 1,
       _currentPage + 1,
-    }.where((page) => page >= 1 && page <= (_documentInfo?.totalPages ?? 0)).toSet();
+    }.where((page) => page >= 1 && page <= _documentInfo!.totalPages).toSet();
 
     final keysToRemove = _pageCache.keys
         .where((page) => !pagesToKeep.contains(page))
@@ -2079,113 +1691,125 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       _removePageFromCache(key);
     }
 
-    // Clear all queues
+    // Clear queues
     _loadQueue.clear();
 
-    // Cancel all loading operations
-    _loadingPages.clear();
+    // Cancel loading pages
+    final loadingToCancel = _loadingPages
+        .where((page) => !pagesToKeep.contains(page))
+        .toList();
+
+    for (final page in loadingToCancel) {
+      _loadingPages.remove(page);
+    }
 
     // Notify JavaScript
-    _iframeElement.contentWindow?.postMessage({
-      'type': 'lowMemory',
-    }, '*');
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'lowMemory',
+      }, '*');
+    }
 
-    _debugLog('AGGRESSIVE MEMORY CLEANUP: Removed ${keysToRemove.length} pages');
-    _debugMemoryLog();
+    _debugLog('LOW MEMORY CLEANUP: Removed ${keysToRemove.length} pages, kept ${pagesToKeep.length} pages');
   }
+
+
 
   void _cleanupAllResources() {
     _pageCache.clear();
+    _loadedPages.clear();
     _loadingPages.clear();
     _loadQueue.clear();
     _pageAccessTimes.clear();
     _pageAccessOrder.clear();
 
-    _scrollPreventionTimer?.cancel();
-    _cleanupTimer?.cancel();
-    _memoryMonitorTimer?.cancel();
-
-    // Notify JavaScript to clear everything
-    _iframeElement.contentWindow?.postMessage({
-      'type': 'clearCache',
-    }, '*');
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'clearAll',
+      }, '*');
+    }
   }
 
-  void _navigateToPage(int pageNum) {
-    if (_documentInfo == null) return;
+  void _navigateToPage(int page) {
+    if (page < 1 || page > _documentInfo!.totalPages) return;
 
-    final targetPage = pageNum.clamp(1, _documentInfo!.totalPages);
     setState(() {
-      _currentPage = targetPage;
-      _pageController.text = targetPage.toString();
+      _currentPage = page;
+      _pageController.text = page.toString();
     });
 
-    _iframeElement.contentWindow?.postMessage({
-      'type': 'navigateToPage',
-      'page': targetPage,
-    }, '*');
-
-    // Ensure target page is loaded
-    if (!_pageCache.contains(targetPage) && !_loadingPages.contains(targetPage)) {
-      _queuePageLoad(targetPage, priority: true);
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'setPage',
+        'page': page,
+      }, '*');
     }
+
+    // Ensure page is loaded
+    if (!_pageCache.contains(page) && !_loadingPages.contains(page)) {
+      _queuePageLoad(page, priority: true);
+    }
+
+    _updatePageAccess(page);
   }
 
-  void _handlePageInput() {
-    final input = _pageController.text;
-    final pageNum = int.tryParse(input);
+  void _changeViewMode(PdfViewMode newMode) {
+    setState(() {
+      _currentViewMode = newMode;
+    });
 
-    if (pageNum != null &&
-        _documentInfo != null &&
-        pageNum >= 1 &&
-        pageNum <= _documentInfo!.totalPages) {
-      _navigateToPage(pageNum);
-    } else {
-      // Reset to current page if invalid
-      _pageController.text = _currentPage.toString();
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'changeViewMode',
+        'viewMode': newMode == PdfViewMode.singlePage ? 'singlePage' : 'multiplePages', // Make sure this is a string
+      }, '*');
     }
+
+    // Re-center current page
+    _navigateToPage(_currentPage);
   }
 
   void _zoomIn() {
-    final newZoom = (_zoomLevel + 0.1).clamp(0.25, _isMobile ? 3.0 : 5.0);
-    setState(() {
-      _zoomLevel = newZoom;
-    });
-
-    _iframeElement.contentWindow?.postMessage({
-      'type': 'setZoom',
-      'zoom': newZoom,
-    }, '*');
+    final newZoom = (_zoomLevel * 1.2).clamp(0.25, 5.0);
+    _setZoom(newZoom);
   }
 
   void _zoomOut() {
-    final newZoom = (_zoomLevel - 0.1).clamp(0.25, _isMobile ? 3.0 : 5.0);
-    setState(() {
-      _zoomLevel = newZoom;
-    });
-
-    _iframeElement.contentWindow?.postMessage({
-      'type': 'setZoom',
-      'zoom': newZoom,
-    }, '*');
+    final newZoom = (_zoomLevel / 1.2).clamp(0.25, 5.0);
+    _setZoom(newZoom);
   }
 
   void _resetZoom() {
+    _setZoom(1.0);
+  }
+
+  void _setZoom(double zoom) {
     setState(() {
-      _zoomLevel = 1.0;
+      _zoomLevel = zoom;
     });
 
-    _iframeElement.contentWindow?.postMessage({
-      'type': 'setZoom',
-      'zoom': 1.0,
-    }, '*');
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'setZoom',
+        'zoom': zoom,
+      }, '*');
+    }
+
+    // Reload current page with new zoom
+    if (_pageCache.contains(_currentPage)) {
+      _pageCache.remove(_currentPage);
+      _queuePageLoad(_currentPage, priority: true);
+    }
   }
 
   @override
   void dispose() {
-    _cleanupAllResources();
+    _cleanupTimer?.cancel();
+    _memoryMonitorTimer?.cancel();
+    _scrollPreventionTimer?.cancel();
     _pageController.dispose();
     _pageFocusNode.dispose();
+    _cleanupAllResources();
     super.dispose();
   }
 
@@ -2194,219 +1818,296 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
-        backgroundColor: Colors.grey[900],
-        foregroundColor: Colors.white,
         actions: [
-          // Page navigation
-          if (_documentInfo != null) ...[
-            IconButton(
-              icon: const Icon(Icons.first_page),
-              onPressed: _currentPage > 1 ? () => _navigateToPage(1) : null,
-              tooltip: 'First page',
-            ),
-            IconButton(
-              icon: const Icon(Icons.navigate_before),
-              onPressed: _currentPage > 1 ? () => _navigateToPage(_currentPage - 1) : null,
-              tooltip: 'Previous page',
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 50,
-                    child: TextField(
-                      controller: _pageController,
-                      focusNode: _pageFocusNode,
-                      textAlign: TextAlign.center,
-                      keyboardType: TextInputType.number,
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
-                      decoration: const InputDecoration(
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.symmetric(vertical: 4),
-                      ),
-                      onTap: () {
-                        setState(() {
-                          _isEditingPage = true;
-                        });
-                      },
-                      onEditingComplete: () {
-                        setState(() {
-                          _isEditingPage = false;
-                        });
-                        _handlePageInput();
-                      },
-                      onSubmitted: (_) {
-                        setState(() {
-                          _isEditingPage = false;
-                        });
-                        _handlePageInput();
-                      },
+          // View mode toggle
+          PopupMenuButton<PdfViewMode>(
+            icon: const Icon(Icons.view_day),
+            onSelected: _changeViewMode,
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: PdfViewMode.singlePage,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.view_day,
+                      color: _currentViewMode == PdfViewMode.singlePage
+                          ? Theme.of(context).primaryColor
+                          : null,
                     ),
-                  ),
-                  Text(
-                    ' / ${_documentInfo!.totalPages}',
-                    style: const TextStyle(color: Colors.white70, fontSize: 14),
-                  ),
-                ],
+                    const SizedBox(width: 8),
+                    const Text('Single Page'),
+                  ],
+                ),
               ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.navigate_next),
-              onPressed: _currentPage < (_documentInfo?.totalPages ?? 0)
-                  ? () => _navigateToPage(_currentPage + 1)
-                  : null,
-              tooltip: 'Next page',
-            ),
-            IconButton(
-              icon: const Icon(Icons.last_page),
-              onPressed: _currentPage < (_documentInfo?.totalPages ?? 0)
-                  ? () => _navigateToPage(_documentInfo!.totalPages)
-                  : null,
-              tooltip: 'Last page',
-            ),
-          ],
+              PopupMenuItem(
+                value: PdfViewMode.multiplePages,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.view_week,
+                      color: _currentViewMode == PdfViewMode.multiplePages
+                          ? Theme.of(context).primaryColor
+                          : null,
+                    ),
+                    const SizedBox(width: 8),
+                    const Text('Multiple Pages'),
+                  ],
+                ),
+              ),
+            ],
+          ),
           // Zoom controls
-          IconButton(
-            icon: const Icon(Icons.zoom_out),
-            onPressed: _zoomOut,
-            tooltip: 'Zoom out',
-          ),
-          IconButton(
-            icon: Text('${(_zoomLevel * 100).round()}%'),
-            onPressed: _resetZoom,
-            tooltip: 'Reset zoom',
-          ),
-          IconButton(
+          PopupMenuButton<double>(
             icon: const Icon(Icons.zoom_in),
-            onPressed: _zoomIn,
-            tooltip: 'Zoom in',
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                child: const Text('Zoom In'),
+                onTap: _zoomIn,
+              ),
+              PopupMenuItem(
+                child: const Text('Zoom Out'),
+                onTap: _zoomOut,
+              ),
+              PopupMenuItem(
+                child: const Text('Reset Zoom'),
+                onTap: _resetZoom,
+              ),
+              PopupMenuItem(
+                enabled: false,
+                child: Text('Current: ${(_zoomLevel * 100).round()}%'),
+              ),
+            ],
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          // PDF Viewer
-          if (_isLoading && _error == null)
-            const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text(
-                    'Loading document...',
-                    style: TextStyle(fontSize: 16),
-                  ),
-                ],
-              ),
-            )
-          else if (_error != null)
-            Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.error_outline,
-                    size: 64,
-                    color: Colors.red[400],
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Error loading document',
-                    style: TextStyle(
-                      fontSize: 18,
-                      color: Colors.red[400],
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 32.0),
-                    child: Text(
-                      _error!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontSize: 14),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  ElevatedButton.icon(
-                    onPressed: _loadDocument,
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Retry'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue,
-                      foregroundColor: Colors.white,
-                    ),
-                  ),
-                ],
-              ),
-            )
-          else
-            HtmlElementView(
-              viewType: _viewId,
-            ),
+      body: _buildBody(),
+      bottomNavigationBar: _buildBottomNavigation(),
+    );
+  }
 
-          // FIXED: Smaller scroll prevention warning positioned below app bar
-          if (_isScrollPrevented)
-            Positioned(
-              top: _isMobile ? 70 : 80, // Position below app bar
-              left: 20,
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text('Loading document...'),
+          ],
+        ),
+      );
+    }
+
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.error_outline,
+                size: 64,
+                color: Colors.red,
+              ),
+              SizedBox(height: 16),
+              Text(
+                'Error loading document',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              SizedBox(height: 8),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _loadDocument,
+                child: Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Stack(
+      children: [
+        // PDF Viewer
+        HtmlElementView(
+          viewType: _viewId,
+        ),
+
+        // Loading overlay for current page
+        if (_loadingPages.contains(_currentPage))
+          Positioned(
+            top: 100,
+            left: 0,
+            right: 0,
+            child: Center(
               child: Container(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.8),
+                  color: Colors.black.withOpacity(0.7),
                   borderRadius: BorderRadius.circular(8),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.3),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(
-                      Icons.touch_app,
-                      size: 16,
-                      color: Colors.white,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _isMobile ? 'Scroll disabled' : 'Scroll disabled',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
+                    SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation(Colors.white),
                       ),
+                    ),
+                    SizedBox(width: 12),
+                    Text(
+                      'Loading page $_currentPage...',
+                      style: TextStyle(color: Colors.white),
                     ),
                   ],
                 ),
               ),
             ),
+          ),
 
-          // Memory usage indicator (debug)
-          if (widget.config.enableDebugLogging)
-            Positioned(
-              top: 10,
-              left: 10,
-              child: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.7),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  '${(_pageCache.totalMemory / (1024 * 1024)).toStringAsFixed(2)}MB | ${_pageCache.size} cached',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
+        // Scroll prevention overlay
+        if (_isScrollPrevented)
+          Positioned.fill(
+            child: Container(
+              color: Colors.transparent,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.7),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.zoom_in, color: Colors.white, size: 32),
+                      SizedBox(height: 8),
+                      Text(
+                        'Zooming...\nScroll disabled temporarily',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white),
+                      ),
+                    ],
                   ),
                 ),
               ),
             ),
+          ),
+
+        // Memory warning
+        if (_pageCache.totalMemory > widget.config.maxMemoryMB * 0.9 * 1024 * 1024)
+          Positioned(
+            top: 20,
+            left: 20,
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withOpacity(0.9),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.memory, color: Colors.white),
+                  SizedBox(width: 8),
+                  Text(
+                    'High memory usage',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildBottomNavigation() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: Theme.of(context).bottomAppBarTheme.color,
+        border: Border(
+          top: BorderSide(
+            color: Theme.of(context).dividerColor,
+            width: 1,
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            icon: Icon(Icons.chevron_left),
+            onPressed: _currentPage > 1
+                ? () => _navigateToPage(_currentPage - 1)
+                : null,
+          ),
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 60,
+                  child: TextField(
+                    controller: _pageController,
+                    focusNode: _pageFocusNode,
+                    textAlign: TextAlign.center,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    ),
+                    onTap: () {
+                      setState(() {
+                        _isEditingPage = true;
+                      });
+                    },
+                    onSubmitted: (value) {
+                      setState(() {
+                        _isEditingPage = false;
+                      });
+                      final page = int.tryParse(value);
+                      if (page != null) {
+                        _navigateToPage(page);
+                      } else {
+                        _pageController.text = _currentPage.toString();
+                      }
+                    },
+                    onEditingComplete: () {
+                      setState(() {
+                        _isEditingPage = false;
+                      });
+                      final page = int.tryParse(_pageController.text);
+                      if (page != null) {
+                        _navigateToPage(page);
+                      } else {
+                        _pageController.text = _currentPage.toString();
+                      }
+                    },
+                  ),
+                ),
+                Text(
+                  ' of ${_documentInfo?.totalPages ?? '?'}',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: Icon(Icons.chevron_right),
+            onPressed: _currentPage < (_documentInfo?.totalPages ?? 1)
+                ? () => _navigateToPage(_currentPage + 1)
+                : null,
+          ),
         ],
       ),
     );

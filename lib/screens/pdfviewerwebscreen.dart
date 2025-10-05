@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdf_image_viewer/appconfig.dart';
-import 'package:pdf_image_viewer/screens/pdfviwerwebscreen2.dart';
 import 'dart:html' as html;
 import 'dart:ui' as ui;
 import 'dart:convert';
@@ -10,7 +9,30 @@ import 'dart:typed_data';
 import '../services/pdf_api_service.dart';
 import '../models/document_info.dart';
 
+//oke, tapi halaman suka nggak loading
 
+class PdfViewerConfig {
+  final int cacheSize;
+  final int maxConcurrentLoads;
+  final int cacheWindowSize;
+  final Duration cleanupInterval;
+  final int maxMemoryMB;
+  final bool enablePerformanceMonitoring;
+  final bool enableAutoRetry;
+  final bool enableDebugLogging;
+
+
+  const PdfViewerConfig({
+    this.cacheSize = 10,
+    this.maxConcurrentLoads = 10,
+    this.cacheWindowSize = 10,
+    this.cleanupInterval = const Duration(seconds: 3),
+    this.maxMemoryMB = 100,
+    this.enablePerformanceMonitoring = true,
+    this.enableAutoRetry = true,
+    this.enableDebugLogging = false,
+  });
+}
 
 class PdfViewerWebScreen extends StatefulWidget {
   final String documentId;
@@ -341,8 +363,11 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           if (page != null) {
             final pageNum = page is int ? page : int.tryParse(page.toString());
             if (pageNum != null) {
-              print('Page $pageNum requested');
-              _queuePageLoad(pageNum);
+              // ADD THIS CHECK: Only queue if not already cached or loading
+              if (!_pageCache.contains(pageNum) && !_loadingPages.contains(pageNum)) {
+                print('Page $pageNum requested');
+                _queuePageLoad(pageNum);
+              }
             }
           }
           break;
@@ -498,10 +523,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   }
 
   void _handleScrollStopped(int pageNum) {
-    if (_isScrollPrevented) {
-      return;
-    }
-
     _debugLog('Scroll stopped at page $pageNum');
     _isScrolling = false;
     _lastStableCurrentPage = pageNum;
@@ -527,8 +548,9 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   void _preloadNearbyPagesReduced(int currentPage) {
     if (_documentInfo == null) return;
 
-    if (_isScrollPrevented) {
-      print('Skipping preload (scroll prevention active)');
+    // Only check scroll prevention if we're CURRENTLY scrolling
+    if (_isScrollPrevented && _isScrolling) {
+      print('Skipping preload (scroll prevention active during scroll)');
       return;
     }
 
@@ -662,12 +684,25 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     }
   }
 
+
   void _initializeViewer() {
     if (_documentInfo == null) return;
 
     setState(() {
       _isLoading = false;
     });
+
+    // Prepare page dimensions data from DocumentInfo
+    final pageDimensionsJson = _documentInfo!.pages?.map((pageInfo) {
+      return {
+        'pageNumber': pageInfo.pageNumber,
+        'width': pageInfo.dimensions.width,
+        'height': pageInfo.dimensions.height,
+        'unit': pageInfo.dimensions.unit,
+      };
+    }).toList() ?? [];
+
+    final pageDimensionsJsonString = jsonEncode(pageDimensionsJson);
 
     final htmlContent = r'''
 <!DOCTYPE html>
@@ -708,12 +743,16 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       padding: 20px 0;
       gap: 20px;
       min-width: min-content;
+      transform-origin: center top;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+      perspective: 1000px;
+      -webkit-perspective: 1000px;
     }
     .page-container {
       position: relative;
       box-shadow: 0 2px 8px rgba(0,0,0,0.3);
       background: white;
-      min-height: 400px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -854,6 +893,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     let scale = 1.0;
     let currentPage = 1;
     const totalPages = ''' + _documentInfo!.totalPages.toString() + r''';
+    const pageDimensions = ''' + pageDimensionsJsonString + r''';
     const pageData = new Map();
     const pageElements = new Map();
     const loadingPages = new Set();
@@ -872,15 +912,52 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     let zoomEndTime = 0;
     const SCROLL_PREVENTION_DURATION = 600;
     
+    const rerenderDebounce = new Map();
+    let zoomThrottle = null;
+    let pendingZoomScale = null;
+    
     function init() {
       console.log('Initializing viewer with', totalPages, 'pages');
+      console.log('Page dimensions available:', pageDimensions.length, 'pages');
+      
+      const containerWidth = container.clientWidth - 40;
+      const isMobile = containerWidth < 768;
+      const baseScale = isMobile ? 1.2 : 1.5;
       
       for (let i = 1; i <= totalPages; i++) {
         const pageContainer = document.createElement('div');
         pageContainer.className = 'page-container loading';
         pageContainer.id = 'page-' + i;
-        pageContainer.style.width = '100%';
         pageContainer.dataset.pageNumber = i.toString();
+        
+        const pageDim = pageDimensions.find(p => p.pageNumber === i);
+        if (pageDim) {
+          let widthPt = pageDim.width;
+          let heightPt = pageDim.height;
+          
+          if (pageDim.unit === 'mm') {
+            widthPt = pageDim.width * 2.83465;
+            heightPt = pageDim.height * 2.83465;
+          } else if (pageDim.unit === 'in') {
+            widthPt = pageDim.width * 72;
+            heightPt = pageDim.height * 72;
+          }
+          
+          const displayWidth = widthPt * baseScale;
+          const displayHeight = heightPt * baseScale;
+          
+          pageContainer.style.width = displayWidth + 'px';
+          pageContainer.style.height = displayHeight + 'px';
+          pageContainer.style.minHeight = 'auto';
+          pageContainer.style.maxHeight = 'none';
+          
+          console.log('Page', i, 'pre-sized:', displayWidth.toFixed(0), 'x', displayHeight.toFixed(0), 'px');
+        } else {
+          pageContainer.style.width = '100%';
+          pageContainer.style.height = 'auto';
+          pageContainer.style.minHeight = '400px';
+          console.warn('No dimension data for page', i);
+        }
         
         const spinner = document.createElement('div');
         spinner.className = 'loading-spinner';
@@ -893,14 +970,20 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         pageContainer.appendChild(pageNumber);
         
         pagesWrapper.appendChild(pageContainer);
-        pageElements.set(i, { container: pageContainer, canvas: null, pdf: null, rendered: false });
+        pageElements.set(i, { 
+          container: pageContainer, 
+          canvas: null, 
+          pdf: null, 
+          rendered: false,
+          dimensions: pageDim
+        });
       }
       
       setupScrollListener();
       setupZoomControls();
       setupKeyboardControls();
       
-      console.log('Sending viewerReady message');
+      console.log('Viewer ready with pre-sized pages');
       window.parent.postMessage({ type: 'viewerReady' }, '*');
     }
 
@@ -955,10 +1038,38 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             pageContainer.appendChild(pageNumber);
             
             pageContainer.classList.add('loading');
-            pageContainer.style.height = 'auto';
-            pageContainer.style.minHeight = '400px';
             
             const pageInfo = pageElements.get(i);
+            if (pageInfo && pageInfo.dimensions) {
+              const pageDim = pageInfo.dimensions;
+              const containerWidth = container.clientWidth;
+              const isMobile = containerWidth < 768;
+              const baseScale = isMobile ? 1.2 : 1.5;
+              const finalScale = scale * baseScale;
+              
+              let widthPt = pageDim.width;
+              let heightPt = pageDim.height;
+              
+              if (pageDim.unit === 'mm') {
+                widthPt = pageDim.width * 2.83465;
+                heightPt = pageDim.height * 2.83465;
+              } else if (pageDim.unit === 'in') {
+                widthPt = pageDim.width * 72;
+                heightPt = pageDim.height * 72;
+              }
+              
+              const displayWidth = widthPt * finalScale;
+              const displayHeight = heightPt * finalScale;
+              
+              pageContainer.style.width = displayWidth + 'px';
+              pageContainer.style.height = displayHeight + 'px';
+              pageContainer.style.minHeight = 'auto';
+              pageContainer.style.maxHeight = 'none';
+            } else {
+              pageContainer.style.height = 'auto';
+              pageContainer.style.minHeight = '400px';
+            }
+            
             if (pageInfo) {
               pageInfo.rendered = false;
               pageInfo.canvas = null;
@@ -976,209 +1087,446 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     }
     
     function setupScrollListener() {
-      pageIndicatorTotal.textContent = 'of ' + totalPages;
-      
-      let indicatorTimeout;
-      let lastReportedPage = currentPage;
-      let rapidPageChangeCount = 0;
-      let lastPageChangeTime = 0;
-      const RAPID_CHANGE_THRESHOLD = 3;
-      const RAPID_CHANGE_TIMEFRAME = 1000;
-      let isFastScrolling = false;
-      
-      const observer = new IntersectionObserver((entries) => {
-        if (isZooming || isFastScrolling || (Date.now() - zoomEndTime) < SCROLL_PREVENTION_DURATION) {
-          return;
-        }
-        
-        let mostVisiblePage = currentPage;
-        let highestVisibility = 0;
-        
-        entries.forEach(entry => {
-          if (entry.isIntersecting) {
-            const pageNum = parseInt(entry.target.id.split('-')[1]);
-            const visibility = entry.intersectionRatio;
-            
-            if (visibility > highestVisibility) {
-              highestVisibility = visibility;
-              mostVisiblePage = pageNum;
-            }
-            
-            if (visibility > 0.1 && !pageData.has(pageNum) && !loadingPages.has(pageNum)) {
-              console.log('Page', pageNum, 'visible but not loaded, requesting');
-              window.parent.postMessage({ type: 'requestPage', page: pageNum }, '*');
-            }
-          }
-        });
-        
-        if (mostVisiblePage !== currentPage && highestVisibility > 0.3) {
-          const now = Date.now();
-          const timeSinceLastChange = now - lastPageChangeTime;
-          
-          if (timeSinceLastChange < 200) {
-            rapidPageChangeCount++;
-            
-            if (rapidPageChangeCount >= RAPID_CHANGE_THRESHOLD && !isFastScrolling) {
-              isFastScrolling = true;
-              scrollSpeedIndicator.classList.add('visible');
-              window.parent.postMessage({ 
-                type: 'scrollStateChanged', 
-                isScrolling: true,
-                isFastScrolling: true 
-              }, '*');
-              console.log('Fast scrolling detected');
-            }
-          } else {
-            if (timeSinceLastChange > 500) {
-              rapidPageChangeCount = 0;
-            }
-          }
-          
-          lastPageChangeTime = now;
-          currentPage = mostVisiblePage;
-          updatePageIndicator();
-          
-          if (Math.abs(currentPage - lastReportedPage) >= 1) {
-            window.parent.postMessage({ type: 'pageInView', page: currentPage }, '*');
-            lastReportedPage = currentPage;
-          }
-        }
-      }, {
-        root: container,
-        rootMargin: '0px',
-        threshold: [0.1, 0.3, 0.5, 0.7, 0.9]
-      });
-      
-      let scrollStopTimeout;
-      
-      container.addEventListener('scroll', () => {
-        const isScrollPrevented = isZooming || (Date.now() - zoomEndTime) < SCROLL_PREVENTION_DURATION;
-        
-        if (isScrollPrevented) {
-          return;
-        }
-        
-        pageIndicator.classList.add('visible');
-        clearTimeout(indicatorTimeout);
-        indicatorTimeout = setTimeout(() => {
-          pageIndicator.classList.remove('visible');
-        }, 1500);
-        
-        clearTimeout(scrollStopTimeout);
-        
-        scrollStopTimeout = setTimeout(() => {
-          if (isFastScrolling) {
-            isFastScrolling = false;
-            rapidPageChangeCount = 0;
-            scrollSpeedIndicator.classList.remove('visible');
-            window.parent.postMessage({ 
-              type: 'scrollStopped', 
-              page: currentPage,
-              wasFastScrolling: true 
-            }, '*');
-            console.log('Fast scrolling stopped at page', currentPage);
-          } else {
-            window.parent.postMessage({ 
-              type: 'scrollStopped', 
-              page: currentPage,
-              wasFastScrolling: false 
-            }, '*');
-            console.log('Scroll stopped at page', currentPage);
-          }
-          
-          if (!pageData.has(currentPage) && !loadingPages.has(currentPage)) {
-            console.log('Requesting current page', currentPage, 'after scroll stop');
-            loadingPages.add(currentPage);
-            window.parent.postMessage({ type: 'requestPage', page: currentPage }, '*');
-          }
-        }, SCROLL_STOP_DELAY);
-      });
-      
-      pageElements.forEach((data, pageNum) => {
-        observer.observe(data.container);
-      });
-      
-      function updatePageIndicator() {
-        pageIndicatorCurrent.textContent = currentPage;
-      }
+  pageIndicatorTotal.textContent = 'of ' + totalPages;
+  
+  let indicatorTimeout;
+  let lastReportedPage = currentPage;
+  let rapidPageChangeCount = 0;
+  let lastPageChangeTime = 0;
+  const RAPID_CHANGE_THRESHOLD = 3;
+  const RAPID_CHANGE_TIMEFRAME = 1000;
+  let isFastScrolling = false;
+  
+  // ADD THIS: Track pending requests to prevent duplicates
+  const pendingRequests = new Set();
+  let requestDebounceTimers = new Map();
+  
+  function forceUpdateCurrentPage() {
+    const visiblePage = getCurrentVisiblePage();
+    if (visiblePage !== currentPage) {
+      currentPage = visiblePage;
+      pageIndicatorCurrent.textContent = currentPage;
+      window.parent.postMessage({ type: 'pageInView', page: currentPage }, '*');
+      lastReportedPage = currentPage;
+      console.log('Forced page update to:', currentPage);
+    }
+  }
+  
+  window.forceUpdateCurrentPage = forceUpdateCurrentPage;
+  
+  // ADD THIS: Helper function to request page with debouncing
+  function requestPageLoad(pageNum) {
+    // Skip if already loaded, loading, or pending request
+    if (pageData.has(pageNum) || loadingPages.has(pageNum) || pendingRequests.has(pageNum)) {
+      return;
     }
     
-    async function renderPage(pageNum, pdfData) {
-      const pageInfo = pageElements.get(pageNum);
-      if (!pageInfo || pageInfo.rendered) return;
-      
-      try {
-        const binary = atob(pdfData);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
+    // Clear any existing debounce timer for this page
+    if (requestDebounceTimers.has(pageNum)) {
+      clearTimeout(requestDebounceTimers.get(pageNum));
+    }
+    
+    // Debounce the request
+    const timer = setTimeout(() => {
+      if (!pageData.has(pageNum) && !loadingPages.has(pageNum)) {
+        pendingRequests.add(pageNum);
+        loadingPages.add(pageNum);
+        console.log('Page', pageNum, 'visible but not loaded, requesting');
+        window.parent.postMessage({ type: 'requestPage', page: pageNum }, '*');
+        
+        // Clear pending flag after a delay (in case request fails)
+        setTimeout(() => {
+          pendingRequests.delete(pageNum);
+        }, 5000);
+      }
+      requestDebounceTimers.delete(pageNum);
+    }, 100); // 100ms debounce
+    
+    requestDebounceTimers.set(pageNum, timer);
+  }
+  
+  const observer = new IntersectionObserver((entries) => {
+    if (isZooming || isFastScrolling || (Date.now() - zoomEndTime) < SCROLL_PREVENTION_DURATION) {
+      return;
+    }
+    
+    let mostVisiblePage = currentPage;
+    let highestVisibility = 0;
+    
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const pageNum = parseInt(entry.target.id.split('-')[1]);
+        const visibility = entry.intersectionRatio;
+        
+        if (visibility > highestVisibility) {
+          highestVisibility = visibility;
+          mostVisiblePage = pageNum;
         }
         
-        const loadingTask = pdfjsLib.getDocument({ 
-          data: bytes,
-          useSystemFonts: true,
-          standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/standard_fonts/',
-        });
+        // Use debounced request function instead of direct postMessage
+        if (visibility > 0.1) {
+          requestPageLoad(pageNum);
+        }
+      }
+    });
+    
+    if (mostVisiblePage !== currentPage && highestVisibility > 0.3) {
+      const now = Date.now();
+      const timeSinceLastChange = now - lastPageChangeTime;
+      
+      if (timeSinceLastChange < 200) {
+        rapidPageChangeCount++;
         
-        const pdf = await loadingTask.promise;
-        const page = await pdf.getPage(1);
-        
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        
+        if (rapidPageChangeCount >= RAPID_CHANGE_THRESHOLD && !isFastScrolling) {
+          isFastScrolling = true;
+          scrollSpeedIndicator.classList.add('visible');
+          window.parent.postMessage({ 
+            type: 'scrollStateChanged', 
+            isScrolling: true,
+            isFastScrolling: true 
+          }, '*');
+          console.log('Fast scrolling detected');
+        }
+      } else {
+        if (timeSinceLastChange > 500) {
+          rapidPageChangeCount = 0;
+        }
+      }
+      
+      lastPageChangeTime = now;
+      currentPage = mostVisiblePage;
+      updatePageIndicator();
+      
+      if (Math.abs(currentPage - lastReportedPage) >= 1) {
+        window.parent.postMessage({ type: 'pageInView', page: currentPage }, '*');
+        lastReportedPage = currentPage;
+      }
+    }
+  }, {
+    root: container,
+    rootMargin: '0px',
+    threshold: [0.1, 0.3, 0.5, 0.7, 0.9]
+  });
+  
+  let scrollStopTimeout;
+  
+  container.addEventListener('scroll', () => {
+    const isScrollPrevented = isZooming || (Date.now() - zoomEndTime) < SCROLL_PREVENTION_DURATION;
+    
+    if (isScrollPrevented) {
+      return;
+    }
+    
+    pageIndicator.classList.add('visible');
+    clearTimeout(indicatorTimeout);
+    indicatorTimeout = setTimeout(() => {
+      pageIndicator.classList.remove('visible');
+    }, 1500);
+    
+    clearTimeout(scrollStopTimeout);
+    
+    scrollStopTimeout = setTimeout(() => {
+      if (isFastScrolling) {
+        isFastScrolling = false;
+        rapidPageChangeCount = 0;
+        scrollSpeedIndicator.classList.remove('visible');
+        window.parent.postMessage({ 
+          type: 'scrollStopped', 
+          page: currentPage,
+          wasFastScrolling: true 
+        }, '*');
+        console.log('Fast scrolling stopped at page', currentPage);
+      } else {
+        window.parent.postMessage({ 
+          type: 'scrollStopped', 
+          page: currentPage,
+          wasFastScrolling: false 
+        }, '*');
+        console.log('Scroll stopped at page', currentPage);
+      }
+      
+      // Use debounced request
+      requestPageLoad(currentPage);
+    }, SCROLL_STOP_DELAY);
+  });
+  
+  pageElements.forEach((data, pageNum) => {
+    observer.observe(data.container);
+  });
+  
+  function updatePageIndicator() {
+    pageIndicatorCurrent.textContent = currentPage;
+  }
+  
+  // ADD THIS: Clear pending flag when page is actually loaded
+  window.clearPendingRequest = function(pageNum) {
+    pendingRequests.delete(pageNum);
+    loadingPages.delete(pageNum);
+  };
+}
+    
+    async function renderPage(pageNum, pdfData) {
+  const pageInfo = pageElements.get(pageNum);
+  if (!pageInfo || pageInfo.rendered) {
+    if (window.clearPendingRequest) {
+      window.clearPendingRequest(pageNum);
+    }
+    return;
+  }
+  
+  try {
+    const binary = atob(pdfData);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    
+    const loadingTask = pdfjsLib.getDocument({ 
+      data: bytes,
+      useSystemFonts: true,
+      standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/standard_fonts/',
+    });
+    
+    const pdf = await loadingTask.promise;
+    const page = await pdf.getPage(1);
+    
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    
+    const containerWidth = container.clientWidth;
+    const isMobile = containerWidth < 768;
+    const baseScale = isMobile ? 1.2 : 1.5;
+    const finalScale = scale * baseScale;
+    
+    const viewport = page.getViewport({ scale: finalScale });
+    
+    canvas.width = viewport.width * pixelRatio;
+    canvas.height = viewport.height * pixelRatio;
+    canvas.style.width = viewport.width + 'px';
+    canvas.style.height = viewport.height + 'px';
+    
+    ctx.scale(pixelRatio, pixelRatio);
+    
+    const renderTask = page.render({
+      canvasContext: ctx,
+      viewport: viewport,
+      background: 'rgba(255, 255, 255, 1)',
+      intent: 'display',
+    });
+    
+    try {
+      await renderTask.promise;
+    } catch (error) {
+      if (error.name === 'RenderingCancelledException') {
+        console.log('Render cancelled for page', pageNum);
+        loadingPages.delete(pageNum);
+        if (window.clearPendingRequest) {
+          window.clearPendingRequest(pageNum);
+        }
+        return;
+      }
+      throw error;
+    }
+    
+    requestAnimationFrame(() => {
+      pageInfo.container.innerHTML = '';
+      pageInfo.container.appendChild(canvas);
+      
+      const pageNumber = document.createElement('div');
+      pageNumber.className = 'page-number';
+      pageNumber.textContent = pageNum + ' / ' + totalPages;
+      pageInfo.container.appendChild(pageNumber);
+      
+      pageInfo.container.classList.remove('loading');
+      pageInfo.container.style.width = viewport.width + 'px';
+      pageInfo.container.style.height = viewport.height + 'px';
+      pageInfo.container.style.minHeight = 'auto';
+      pageInfo.container.style.maxHeight = 'none';
+    });
+    
+    pageInfo.canvas = canvas;
+    pageInfo.pdf = pdf;
+    pageInfo.page = page;
+    pageInfo.rendered = true;
+    
+    pageData.set(pageNum, { 
+      pdf, 
+      page, 
+      canvas, 
+      viewport,
+      renderTask: null 
+    });
+    
+    loadingPages.delete(pageNum);
+    if (window.clearPendingRequest) {
+      window.clearPendingRequest(pageNum);
+    }
+    
+  } catch (error) {
+    console.error('Error rendering page ' + pageNum + ':', error);
+    
+    const spinner = pageInfo.container.querySelector('.loading-spinner');
+    if (spinner) {
+      spinner.textContent = 'Error loading page';
+    }
+    
+    loadingPages.delete(pageNum);
+    if (window.clearPendingRequest) {
+      window.clearPendingRequest(pageNum);
+    }
+  }
+}
+    
+    async function rerenderPage(pageNum) {
+      return rerenderPageWithoutReflow(pageNum);
+    }
+    
+    async function setZoomThrottled(newScale) {
+      pendingZoomScale = newScale;
+      
+      if (zoomThrottle) return;
+      
+      zoomThrottle = setTimeout(() => {
+        if (pendingZoomScale !== null) {
+          setZoom(pendingZoomScale);
+          pendingZoomScale = null;
+        }
+        zoomThrottle = null;
+      }, 50);
+    }
+    
+    async function setZoom(newScale) {
+      if (newScale === scale || Math.abs(newScale - scale) < 0.01) return;
+      if (isZooming) return;
+      
+      isZooming = true;
+      zoomIndicator.classList.add('visible');
+      
+      const oldScale = scale;
+      const scaleChange = newScale / oldScale;
+      
+      const containerRect = container.getBoundingClientRect();
+      const scrollTop = container.scrollTop;
+      const scrollLeft = container.scrollLeft;
+      const viewportCenterY = scrollTop + (containerRect.height / 2);
+      
+      let anchorPageNum = currentPage;
+      let anchorPageTop = 0;
+      const anchorPageEl = document.getElementById('page-' + currentPage);
+      
+      if (anchorPageEl) {
+        anchorPageTop = anchorPageEl.offsetTop;
+      }
+      
+      const offsetFromPageTop = viewportCenterY - anchorPageTop;
+      
+      pagesWrapper.style.transform = `scale(${scaleChange})`;
+      pagesWrapper.style.transformOrigin = `center ${viewportCenterY}px`;
+      pagesWrapper.style.transition = 'none';
+      
+      scale = newScale;
+      
+      setTimeout(() => {
         const containerWidth = container.clientWidth;
         const isMobile = containerWidth < 768;
         const baseScale = isMobile ? 1.2 : 1.5;
         const finalScale = scale * baseScale;
         
-        const viewport = page.getViewport({ scale: finalScale });
+        for (let i = 1; i <= totalPages; i++) {
+          const pageInfo = pageElements.get(i);
+          if (pageInfo && pageInfo.dimensions) {
+            const pageDim = pageInfo.dimensions;
+            
+            let widthPt = pageDim.width;
+            let heightPt = pageDim.height;
+            
+            if (pageDim.unit === 'mm') {
+              widthPt = pageDim.width * 2.83465;
+              heightPt = pageDim.height * 2.83465;
+            } else if (pageDim.unit === 'in') {
+              widthPt = pageDim.width * 72;
+              heightPt = pageDim.height * 72;
+            }
+            
+            const displayWidth = widthPt * finalScale;
+            const displayHeight = heightPt * finalScale;
+            
+            if (!pageInfo.rendered) {
+              pageInfo.container.style.width = displayWidth + 'px';
+              pageInfo.container.style.height = displayHeight + 'px';
+              pageInfo.container.style.minHeight = 'auto';
+              pageInfo.container.style.maxHeight = 'none';
+            }
+          }
+        }
         
-        canvas.width = viewport.width * pixelRatio;
-        canvas.height = viewport.height * pixelRatio;
-        canvas.style.width = viewport.width + 'px';
-        canvas.style.height = viewport.height + 'px';
+        pagesWrapper.style.transform = '';
+        pagesWrapper.style.transformOrigin = '';
         
-        ctx.scale(pixelRatio, pixelRatio);
+        const newAnchorPageEl = document.getElementById('page-' + anchorPageNum);
+        if (newAnchorPageEl) {
+          const newAnchorPageTop = newAnchorPageEl.offsetTop;
+          const newOffsetFromPageTop = offsetFromPageTop * scaleChange;
+          const newScrollTop = newAnchorPageTop + newOffsetFromPageTop - (containerRect.height / 2);
+          
+          container.scrollTop = Math.max(0, newScrollTop);
+          container.scrollLeft = scrollLeft;
+        }
         
-        await page.render({
-          canvasContext: ctx,
-          viewport: viewport,
-          background: 'rgba(255, 255, 255, 1)',
-        }).promise;
-        
-        pageInfo.container.innerHTML = '';
-        pageInfo.container.appendChild(canvas);
-        
-        const pageNumber = document.createElement('div');
-        pageNumber.className = 'page-number';
-        pageNumber.textContent = pageNum + ' / ' + totalPages;
-        pageInfo.container.appendChild(pageNumber);
-        
-        pageInfo.container.classList.remove('loading');
-        pageInfo.container.style.width = 'auto';
-        
-        pageInfo.canvas = canvas;
-        pageInfo.pdf = pdf;
-        pageInfo.page = page;
-        pageInfo.rendered = true;
-        
-        pageData.set(pageNum, { pdf, page, canvas });
-        loadingPages.delete(pageNum);
-        
-      } catch (error) {
-        console.error('Error rendering page ' + pageNum + ':', error);
-        pageInfo.container.querySelector('.loading-spinner').textContent = 'Error loading page';
-        loadingPages.delete(pageNum);
-      }
+        setTimeout(async () => {
+          const visiblePages = [];
+          const currentRect = container.getBoundingClientRect();
+          
+          for (const [pageNum, data] of pageData) {
+            const pageEl = document.getElementById('page-' + pageNum);
+            if (pageEl) {
+              const rect = pageEl.getBoundingClientRect();
+              if (rect.bottom > currentRect.top && rect.top < currentRect.bottom) {
+                visiblePages.push(pageNum);
+              }
+            }
+          }
+          
+          for (const pageNum of visiblePages) {
+            await rerenderPageWithoutReflow(pageNum);
+          }
+          
+          setTimeout(() => {
+            for (const [pageNum, data] of pageData) {
+              if (!visiblePages.includes(pageNum) && Math.abs(pageNum - currentPage) <= 3) {
+                rerenderPageWithoutReflow(pageNum);
+              }
+            }
+          }, 100);
+          
+          isZooming = false;
+          zoomEndTime = Date.now();
+          zoomIndicator.classList.remove('visible');
+          
+          window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
+          
+          // Force page indicator update after zoom
+          setTimeout(() => {
+            if (window.forceUpdateCurrentPage) {
+              window.forceUpdateCurrentPage();
+            }
+          }, 100);
+        }, 50);
+      }, 16);
     }
-    
-    async function rerenderPage(pageNum) {
+
+    async function rerenderPageWithoutReflow(pageNum) {
       const data = pageData.get(pageNum);
       const pageInfo = pageElements.get(pageNum);
       if (!data || !pageInfo) return;
       
       const { page, canvas } = data;
-      const ctx = canvas.getContext('2d');
+      
+      if (data.renderTask) {
+        try {
+          await data.renderTask.cancel();
+        } catch (e) {}
+      }
       
       const containerWidth = container.clientWidth;
       const isMobile = containerWidth < 768;
@@ -1187,104 +1535,58 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       
       const viewport = page.getViewport({ scale: finalScale });
       
-      canvas.width = viewport.width * pixelRatio;
-      canvas.height = viewport.height * pixelRatio;
-      canvas.style.width = viewport.width + 'px';
-      canvas.style.height = viewport.height + 'px';
+      const offscreenCanvas = document.createElement('canvas');
+      const ctx = offscreenCanvas.getContext('2d', { 
+        alpha: false,
+        desynchronized: true 
+      });
+      
+      offscreenCanvas.width = viewport.width * pixelRatio;
+      offscreenCanvas.height = viewport.height * pixelRatio;
+      offscreenCanvas.style.width = viewport.width + 'px';
+      offscreenCanvas.style.height = viewport.height + 'px';
       
       ctx.scale(pixelRatio, pixelRatio);
       
-      await page.render({
+      const renderTask = page.render({
         canvasContext: ctx,
         viewport: viewport,
         background: 'rgba(255, 255, 255, 1)',
-      }).promise;
+      });
       
-      pageInfo.container.style.width = 'auto';
-      pageInfo.container.style.minWidth = viewport.width + 'px';
-    }
-    
-    async function setZoom(newScale) {
-      if (newScale === scale || Math.abs(newScale - scale) < 0.01) return;
-  if (isZooming) return;
-  
-  isZooming = true;
-  zoomIndicator.classList.add('visible');
-  
-  // Lock scroll position
-  const savedScrollTop = container.scrollTop;
-  const savedScrollLeft = container.scrollLeft;
-  
-  const oldScale = scale;
-  scale = newScale;
+      data.renderTask = renderTask;
       
-      const containerRect = container.getBoundingClientRect();
-      const viewportCenterY = container.scrollTop + (containerRect.height / 2);
-      
-      let centerPage = currentPage;
-      let centerPageOffsetTop = 0;
-      let minDistance = Infinity;
-      
-      for (let i = 1; i <= totalPages; i++) {
-        const pageEl = document.getElementById('page-' + i);
-        if (pageEl) {
-          const pageTop = pageEl.offsetTop;
-          const pageCenter = pageTop + (pageEl.offsetHeight / 2);
-          const distance = Math.abs(pageCenter - viewportCenterY);
-          
-          if (distance < minDistance) {
-            minDistance = distance;
-            centerPage = i;
-            centerPageOffsetTop = pageTop;
-          }
+      try {
+        await renderTask.promise;
+        
+        const pageNumberDiv = pageInfo.container.querySelector('.page-number');
+        pageInfo.container.innerHTML = '';
+        
+        pageInfo.container.appendChild(offscreenCanvas);
+        
+        if (pageNumberDiv) {
+          pageInfo.container.appendChild(pageNumberDiv);
         }
+        
+        pageInfo.container.style.width = viewport.width + 'px';
+        pageInfo.container.style.height = viewport.height + 'px';
+        pageInfo.container.style.minHeight = 'auto';
+        pageInfo.container.style.maxHeight = 'none';
+        
+        pageInfo.canvas = offscreenCanvas;
+        data.canvas = offscreenCanvas;
+        
+      } catch (error) {
+        if (error.name !== 'RenderingCancelledException') {
+          console.error('Render error:', error);
+        }
+      } finally {
+        data.renderTask = null;
       }
       
-      const offsetIntoPage = viewportCenterY - centerPageOffsetTop;
-      
-      const renderPromises = [];
-      for (const [pageNum, data] of pageData) {
-        if (Math.abs(pageNum - centerPage) <= 2) {
-          renderPromises.push(rerenderPage(pageNum));
-        }
+      if (data) {
+        data.viewport = viewport;
       }
-      
-      await Promise.all(renderPromises);
-      
-      // Restore scroll position to prevent auto-scrolling
-container.scrollTop = savedScrollTop;
-container.scrollLeft = savedScrollLeft;
-
-const scaleRatio = newScale / oldScale;
-const newPageEl = document.getElementById('page-' + centerPage);
-
-if (newPageEl) {
-  const newPageTop = newPageEl.offsetTop;
-  const newOffsetIntoPage = offsetIntoPage * scaleRatio;
-  const newScrollTop = newPageTop + newOffsetIntoPage - (containerRect.height / 2);
-  
-  // Use requestAnimationFrame to set scroll smoothly
-  requestAnimationFrame(() => {
-    container.scrollTop = Math.max(0, newScrollTop);
-  });
-}
-      
-      setTimeout(() => {
-        for (const [pageNum, data] of pageData) {
-          if (Math.abs(pageNum - centerPage) > 2) {
-            rerenderPage(pageNum);
-          }
-        }
-      }, 100);
-      
-      zoomEndTime = Date.now();
-      isZooming = false;
-      
-      window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
-      
-      setTimeout(() => {
-        zoomIndicator.classList.remove('visible');
-      }, 150);
     }
     
     function scrollToPage(pageNum) {
@@ -1373,7 +1675,7 @@ if (newPageEl) {
             if (e.ctrlKey || e.metaKey) {
               e.preventDefault();
               const newScale = Math.min(3.0, scale + 0.1);
-              await setZoom(newScale);
+              await setZoomThrottled(newScale);
             }
             break;
           case '-':
@@ -1381,7 +1683,7 @@ if (newPageEl) {
             if (e.ctrlKey || e.metaKey) {
               e.preventDefault();
               const newScale = Math.max(0.5, scale - 0.1);
-              await setZoom(newScale);
+              await setZoomThrottled(newScale);
             }
             break;
           case '0':
@@ -1398,7 +1700,6 @@ if (newPageEl) {
       let pinchCenter = { x: 0, y: 0 };
       let lastScale = scale;
       
-      // Desktop wheel zoom
       container.addEventListener('wheel', async (e) => {
         if (e.ctrlKey || e.metaKey) {
           e.preventDefault();
@@ -1406,21 +1707,22 @@ if (newPageEl) {
           const delta = -Math.sign(e.deltaY);
           const newScale = Math.max(0.5, Math.min(3.0, scale + delta * 0.02));
           if (newScale !== scale) {
-            await setZoom(newScale);
+            await setZoomThrottled(newScale);
           }
         }
       }, { passive: false });
       
-      // MOBILE TOUCH PINCH ZOOM - IMPROVED
       let isPinching = false;
       let initialPinchDistance = 0;
       let initialScale = scale;
       let pinchStartTime = 0;
       let pinchStartScrollTop = 0;
       let pinchStartScrollLeft = 0;
-      const PINCH_SMOOTHING_FACTOR = 0.5;
+      const PINCH_SMOOTHING_FACTOR = 0.05;
       let lastPinchUpdate = 0;
-      const PINCH_THROTTLE = 16;
+      const PINCH_THROTTLE = 0;
+      let pinchCenterOffset = { x: 0, y: 0 };
+      let rafId = null;
       
       container.addEventListener('touchstart', (e) => {
         if (e.touches.length === 2) {
@@ -1439,207 +1741,179 @@ if (newPageEl) {
           pinchCenter.x = (touch1.clientX + touch2.clientX) / 2;
           pinchCenter.y = (touch1.clientY + touch2.clientY) / 2;
           
+          const containerRect = container.getBoundingClientRect();
+          pinchCenterOffset.x = pinchCenter.x - containerRect.left;
+          pinchCenterOffset.y = pinchCenter.y - containerRect.top;
+          
           const dx = touch2.clientX - touch1.clientX;
           const dy = touch2.clientY - touch1.clientY;
           initialPinchDistance = Math.sqrt(dx * dx + dy * dy);
           initialScale = scale;
+          lastScale = scale;
           
           container.style.overflow = 'hidden';
           container.style.touchAction = 'none';
-          container.style.position = 'fixed';
           
           window.parent.postMessage({ type: 'zoomStateChanged', isZooming: true }, '*');
         }
       }, { passive: false });
       
       container.addEventListener('touchmove', (e) => {
-  if (isPinching && e.touches.length === 2) {
-    e.preventDefault();
-    
-    const now = Date.now();
-    if (now - lastPinchUpdate < PINCH_THROTTLE) {
-      return;
-    }
-    lastPinchUpdate = now;
-    
-    container.scrollTop = pinchStartScrollTop;
-    container.scrollLeft = pinchStartScrollLeft;
-    
-    const touch1 = e.touches[0];
-    const touch2 = e.touches[1];
-    
-    const dx = touch2.clientX - touch1.clientX;
-    const dy = touch2.clientY - touch1.clientY;
-    const currentDistance = Math.sqrt(dx * dx + dy * dy);
-    
-    if (initialPinchDistance > 0) {
-      const rawScaleChange = currentDistance / initialPinchDistance;
-      
-      const timeElapsed = Date.now() - pinchStartTime;
-      const timeFactor = Math.min(1, timeElapsed / 50);
-      const smoothedScaleChange = 1 + (rawScaleChange - 1) * PINCH_SMOOTHING_FACTOR * timeFactor;
-      
-      lastScale = Math.max(0.5, Math.min(3.0, initialScale * smoothedScaleChange));
-      
-      // Visual transform dengan scale yang akan digunakan
-      const visualScale = lastScale / scale;
-      pagesWrapper.style.transform = 'scale(' + visualScale + ')';
-      pagesWrapper.style.transformOrigin = pinchCenter.x + 'px ' + pinchCenter.y + 'px';
-      
-      // Log untuk debug
-      console.log('Pinching: lastScale =', lastScale.toFixed(2), 'visualScale =', visualScale.toFixed(2));
-    }
-  } else if (isPinching) {
-    isPinching = false;
-    pagesWrapper.style.transform = '';
-    pagesWrapper.style.transformOrigin = '';
-    container.style.position = '';
-  }
-}, { passive: false });
-      
-    container.addEventListener('touchend', async (e) => {
-  if (isPinching) {
-    e.preventDefault();
-    
-    // Hitung scale yang akan digunakan dengan lebih banyak pilihan
-    const snapLevels = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
-    const snapThreshold = 0.1;
-    let targetScale = lastScale;
-    
-    // Cari snap level terdekat
-    let minDiff = Infinity;
-    for (const snapLevel of snapLevels) {
-      const diff = Math.abs(lastScale - snapLevel);
-      if (diff < minDiff) {
-        minDiff = diff;
-        if (diff < snapThreshold) {
-          targetScale = snapLevel;
-        }
-      }
-    }
-    
-    // Jika tidak ada snap yang cocok, gunakan lastScale
-    if (minDiff >= snapThreshold) {
-      targetScale = lastScale;
-    }
-    
-    console.log('Pinch ended: currentScale =', scale.toFixed(2), 'targetScale =', targetScale.toFixed(2));
-    
-    // Jika scale berbeda dari current scale
-    if (Math.abs(targetScale - scale) > 0.01) {
-      // Lock scroll position dan disable smooth scrolling
-      const savedScrollTop = container.scrollTop;
-      const savedScrollLeft = container.scrollLeft;
-      const originalScrollBehavior = container.style.scrollBehavior;
-      container.style.scrollBehavior = 'auto';
-      
-      // Update scale variable
-      const oldScale = scale;
-      scale = targetScale;
-      
-      // Render halaman dengan scale baru
-      const renderPromises = [];
-      for (const [pageNum, data] of pageData) {
-        if (Math.abs(pageNum - currentPage) <= 2) {
-          renderPromises.push(rerenderPage(pageNum));
-        }
-      }
-      
-      // Tunggu rendering selesai
-      await Promise.all(renderPromises);
-      
-      // Hitung posisi relatif halaman saat ini SEBELUM reset transform
-      const currentPageEl = document.getElementById('page-' + currentPage);
-      let relativeScrollRatio = 0;
-      
-      if (currentPageEl) {
-        const pageRect = currentPageEl.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
-        const visibleTop = containerRect.top;
-        const pageTop = pageRect.top;
-        
-        // Hitung berapa persen halaman yang terlihat dari atas
-        relativeScrollRatio = (visibleTop - pageTop) / pageRect.height;
-      }
-      
-      // Tunggu 2 frames untuk memastikan canvas ter-paint
-      await new Promise(resolve => requestAnimationFrame(() => {
-        requestAnimationFrame(resolve);
-      }));
-      
-      // Reset transform
-      pagesWrapper.style.transform = '';
-      pagesWrapper.style.transformOrigin = '';
-      
-      // Hitung scroll position baru berdasarkan ratio yang sama
-      const newPageEl = document.getElementById('page-' + currentPage);
-      if (newPageEl) {
-        // Paksa browser update layout
-        newPageEl.offsetHeight;
-        
-        const newPageTop = newPageEl.offsetTop;
-        const newPageHeight = newPageEl.offsetHeight;
-        
-        // Set scroll agar ratio visual tetap sama
-        const targetScroll = newPageTop - (relativeScrollRatio * newPageHeight);
-        container.scrollTop = Math.max(0, targetScroll);
-      } else {
-        container.scrollTop = savedScrollTop;
-      }
-      
-      container.scrollLeft = savedScrollLeft;
-      
-      // Restore scroll behavior
-      container.style.scrollBehavior = originalScrollBehavior;
-      
-      // Kirim message ke parent
-      window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
-      
-      // Render halaman lainnya di background
-      setTimeout(() => {
-        for (const [pageNum, data] of pageData) {
-          if (Math.abs(pageNum - currentPage) > 2) {
-            rerenderPage(pageNum);
+        if (isPinching && e.touches.length === 2) {
+          e.preventDefault();
+          
+          if (rafId) {
+            cancelAnimationFrame(rafId);
           }
+          
+          const touch1 = e.touches[0];
+          const touch2 = e.touches[1];
+          
+          const dx = touch2.clientX - touch1.clientX;
+          const dy = touch2.clientY - touch1.clientY;
+          const currentDistance = Math.sqrt(dx * dx + dy * dy);
+          
+          if (initialPinchDistance > 0) {
+            const rawScaleChange = currentDistance / initialPinchDistance;
+            
+            const smoothedScaleChange = 1 + (rawScaleChange - 1) * (1 - PINCH_SMOOTHING_FACTOR);
+            lastScale = Math.max(0.5, Math.min(3.0, initialScale * smoothedScaleChange));
+            
+            const visualScale = lastScale / scale;
+            
+            rafId = requestAnimationFrame(() => {
+              pagesWrapper.style.transform = 'scale(' + visualScale + ')';
+              pagesWrapper.style.transformOrigin = pinchCenterOffset.x + 'px ' + pinchCenterOffset.y + 'px';
+              pagesWrapper.style.willChange = 'transform';
+            });
+          }
+        } else if (isPinching) {
+          isPinching = false;
+          if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+          }
+          pagesWrapper.style.transform = '';
+          pagesWrapper.style.transformOrigin = '';
+          pagesWrapper.style.willChange = '';
         }
-      }, 100);
-    } else {
-      // Scale sama, langsung reset transform
-      pagesWrapper.style.transform = '';
-      pagesWrapper.style.transformOrigin = '';
-    }
-    
-    // Set isPinching false SETELAH semua selesai
-    isPinching = false;
-    
-    // Re-enable scroll dengan delay
-    setTimeout(() => {
-      container.style.overflow = '';
-      container.style.touchAction = '';
-      container.style.position = '';
-      zoomEndTime = Date.now();
-      isZooming = false;
-      zoomIndicator.classList.remove('visible');
-      window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
-    }, 200);
-  }
-}, { passive: false });
+      }, { passive: false });
+      
+      container.addEventListener('touchend', async (e) => {
+        if (isPinching) {
+          e.preventDefault();
+          
+          const snapLevels = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
+          const snapThreshold = 0.08;
+          let targetScale = lastScale;
+          
+          let minDiff = Infinity;
+          for (const snapLevel of snapLevels) {
+            const diff = Math.abs(lastScale - snapLevel);
+            if (diff < minDiff) {
+              minDiff = diff;
+              if (diff < snapThreshold) {
+                targetScale = snapLevel;
+              }
+            }
+          }
+          
+          if (Math.abs(targetScale - scale) > 0.01) {
+            const oldScale = scale;
+            scale = targetScale;
+            
+            const scaleRatio = targetScale / oldScale;
+            
+            const currentPageEl = document.getElementById('page-' + currentPage);
+            let anchorScrollTop = container.scrollTop;
+            let anchorPageTop = 0;
+            
+            if (currentPageEl) {
+              anchorPageTop = currentPageEl.offsetTop;
+              anchorScrollTop = container.scrollTop + pinchCenterOffset.y;
+            }
+            
+            const relativePosition = anchorScrollTop - anchorPageTop;
+            
+            pagesWrapper.style.transition = 'none';
+            pagesWrapper.style.transform = '';
+            pagesWrapper.style.transformOrigin = '';
+            pagesWrapper.style.willChange = '';
+            
+            const visiblePages = [];
+            for (const [pageNum, data] of pageData) {
+              if (Math.abs(pageNum - currentPage) <= 2) {
+                visiblePages.push(pageNum);
+              }
+            }
+            
+            const renderPromises = visiblePages.map(pageNum => rerenderPageWithoutReflow(pageNum));
+            await Promise.all(renderPromises);
+            
+            await new Promise(resolve => requestAnimationFrame(() => {
+              requestAnimationFrame(resolve);
+            }));
+            
+            const newPageEl = document.getElementById('page-' + currentPage);
+            if (newPageEl) {
+              const newPageTop = newPageEl.offsetTop;
+              const newRelativePosition = relativePosition * scaleRatio;
+              const newScrollTop = newPageTop + newRelativePosition - pinchCenterOffset.y;
+              
+              container.scrollTop = Math.max(0, newScrollTop);
+            }
+            
+            window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
+            
+            setTimeout(() => {
+              for (const [pageNum, data] of pageData) {
+                if (Math.abs(pageNum - currentPage) > 2) {
+                  rerenderPageWithoutReflow(pageNum);
+                }
+              }
+            }, 50);
+          } else {
+            pagesWrapper.style.transform = '';
+            pagesWrapper.style.transformOrigin = '';
+            pagesWrapper.style.willChange = '';
+          }
+          
+          isPinching = false;
+          
+          setTimeout(() => {
+            container.style.overflow = '';
+            container.style.touchAction = '';
+            zoomEndTime = Date.now();
+            isZooming = false;
+            zoomIndicator.classList.remove('visible');
+            window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
+            
+            // Force page indicator update after pinch zoom
+            if (window.forceUpdateCurrentPage) {
+              window.forceUpdateCurrentPage();
+            }
+          }, 100);
+        }
+      }, { passive: false });
       
       container.addEventListener('touchcancel', () => {
         if (isPinching) {
           isPinching = false;
           isZooming = false;
+          if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+          }
           pagesWrapper.style.transform = '';
           pagesWrapper.style.transformOrigin = '';
+          pagesWrapper.style.willChange = '';
           container.style.overflow = '';
           container.style.touchAction = '';
-          container.style.position = '';
           zoomIndicator.classList.remove('visible');
           window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
         }
       });
       
-      // DOUBLE TAP ZOOM
       let lastTap = 0;
       let lastTapLocation = { x: 0, y: 0 };
       const doubleTapThreshold = 350;
@@ -1681,7 +1955,6 @@ if (newPageEl) {
         }
       });
       
-      // Prevent scroll during zoom
       container.addEventListener('scroll', (e) => {
         if (isZooming || (Date.now() - zoomEndTime) < SCROLL_PREVENTION_DURATION) {
           container.scrollTop = container.scrollTop;
@@ -1698,11 +1971,23 @@ if (newPageEl) {
       const data = event.data;
       
       if (data.type === 'loadPage') {
-        await renderPage(data.pageNumber, data.pageData);
+      await renderPage(data.pageNumber, data.pageData);
+    // ADD THIS: Update current page after loading
+    if (data.pageNumber === currentPage) {
+      setTimeout(() => {
+        if (window.forceUpdateCurrentPage) {
+          window.forceUpdateCurrentPage();
+        }
+      }, 100);
+    }
       } else if (data.type === 'setZoom') {
         await setZoom(data.scale);
       } else if (data.type === 'goToPage') {
         scrollToPage(data.page);
+      } else if (data.type === 'forcePageUpdate') {
+        if (window.forceUpdateCurrentPage) {
+          window.forceUpdateCurrentPage();
+        }
       } else if (data.type === 'clearPage') {
         const pageNum = data.page;
         const pageInfo = pageElements.get(pageNum);
@@ -1719,7 +2004,36 @@ if (newPageEl) {
           pageInfo.container.appendChild(pageNumber);
           
           pageInfo.container.classList.add('loading');
-          pageInfo.rendered = false;
+          
+          if (pageInfo.dimensions) {
+            const pageDim = pageInfo.dimensions;
+            const containerWidth = container.clientWidth;
+            const isMobile = containerWidth < 768;
+            const baseScale = isMobile ? 1.2 : 1.5;
+            const finalScale = scale * baseScale;
+            
+            let widthPt = pageDim.width;
+            let heightPt = pageDim.height;
+            
+            if (pageDim.unit === 'mm') {
+              widthPt = pageDim.width * 2.83465;
+              heightPt = pageDim.height * 2.83465;
+            } else if (pageDim.unit === 'in') {
+              widthPt = pageDim.width * 72;
+              heightPt = pageDim.height * 72;
+            }
+            
+            const displayWidth = widthPt * finalScale;
+            const displayHeight = heightPt * finalScale;
+            
+            pageInfo.container.style.width = displayWidth + 'px';
+            pageInfo.container.style.height = displayHeight + 'px';
+            pageInfo.container.style.minHeight = 'auto';
+            pageInfo.container.style.maxHeight = 'none';
+          } else {
+            pageInfo.container.style.height = 'auto';
+            pageInfo.container.style.minHeight = '400px';
+          }
           pageInfo.canvas = null;
           
           if (pageInfo.pdf) {
@@ -1856,9 +2170,9 @@ if (newPageEl) {
   void _preloadNearbyPages(int currentPage) {
     if (_documentInfo == null) return;
 
-    // Don't preload during scroll prevention
-    if (_isScrollPrevented) {
-      print('Skipping preload (scroll prevention active)');
+    // Only check scroll prevention if we're CURRENTLY scrolling
+    if (_isScrollPrevented && _isScrolling) {
+      print('Skipping preload (scroll prevention active during scroll)');
       return;
     }
 

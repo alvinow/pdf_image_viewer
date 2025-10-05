@@ -34,6 +34,7 @@ class PdfApiService {
           .timeout(timeout);
 
       if (response.statusCode == 200) {
+        Map<String,dynamic> bodyDebug= json.decode(response.body);
         return DocumentInfo.fromJson(json.decode(response.body));
       } else if (response.statusCode == 404) {
         throw DocumentNotFoundException('Document not found: $documentId');

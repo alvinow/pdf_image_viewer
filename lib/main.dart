@@ -1,9 +1,8 @@
 // lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:pdf_image_viewer/appconfig.dart';
-import 'package:pdf_image_viewer/screens/pdfviewererbscreenvertical2.dart';
 import 'package:pdf_image_viewer/screens/pdfviewerwebscreen.dart';
-import 'package:pdf_image_viewer/screens/pdfviwerwebscreen2.dart';
+
 
 
 

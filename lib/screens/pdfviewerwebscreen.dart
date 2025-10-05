@@ -2006,7 +2006,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
-        backgroundColor: Colors.grey[900],
+        backgroundColor: Colors.blueGrey,
         foregroundColor: Colors.white,
         actions: [
           // Page navigation
@@ -2085,7 +2085,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             tooltip: 'Zoom out',
           ),
           IconButton(
-            icon: Text('${(_zoomLevel * 100).round()}%'),
+            icon: Text('${(_zoomLevel * 100).round()}%',style: TextStyle(color: Colors.white),),
             onPressed: _resetZoom,
             tooltip: 'Reset zoom',
           ),

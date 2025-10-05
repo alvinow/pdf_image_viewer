@@ -10,7 +10,7 @@ import 'dart:typed_data';
 import '../services/pdf_api_service.dart';
 import '../models/document_info.dart';
 
-//oke sih tp memory leak
+//so far paling oke
 
 // Separate widget class for the loading icon
 class PdfPageLoadingIcon extends StatefulWidget {
@@ -791,12 +791,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     final slowScrollRerenderCount = widget.config.slowScrollRerenderCount;
     final idleRerenderCount = widget.config.idleRerenderCount;
 
-    // Memory management config
-    final memoryKeepRadius = widget.config.memoryKeepRadius;
-    final cleanupAfterScroll = widget.config.cleanupAfterScroll;
-    final cleanupAfterZoom = widget.config.cleanupAfterZoom;
-    final cleanupDelayMs = widget.config.cleanupDelayMs;
-
     final htmlContent = r'''
 <!DOCTYPE html>
 <html>
@@ -862,9 +856,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     }
     canvas.needs-rerender {
       display: none;
-    }
-    canvas.dimmed {
-      opacity: 0.5;
     }
     .page-number {
       position: absolute;
@@ -1028,12 +1019,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       const immediateRerenderRadius = ''' + immediateRerenderRadius.toString() + r''';
       const slowScrollRerenderCount = ''' + slowScrollRerenderCount.toString() + r''';
       const idleRerenderCount = ''' + idleRerenderCount.toString() + r''';
-      
-      // Memory management config
-      const memoryKeepRadius = ''' + memoryKeepRadius.toString() + r''';
-      const cleanupAfterScroll = ''' + cleanupAfterScroll.toString() + r''';
-      const cleanupAfterZoom = ''' + cleanupAfterZoom.toString() + r''';
-      const cleanupDelayMs = ''' + cleanupDelayMs.toString() + r''';
 
       let container;
       let pagesWrapper;
@@ -1050,7 +1035,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       const pageData = new Map();
       const pageElements = new Map();
       const loadingPages = new Set();
-      const deletedPages = new Set();
       
       let isZooming = false;
       let activeZoomAnimation = null;
@@ -1063,7 +1047,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       // Priority queue system
       const rerenderQueue = [];
       const rerenderPriority = new Map();
-      const rerenderingPages = new Map();
+      const rerenderingPages = new Map(); // pageNum -> { priority, renderTask }
       let lastRerenderDirection = 'none';
       let isFastScrolling = false;
       let isScrollingNow = false;
@@ -1071,7 +1055,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       let visiblePagesObserver;
       
       function getPriorityValue(priority) {
-        return { refetch: 4, visible: 3, scroll: 2, immediate: 1, idle: 0 }[priority] || 0;
+        return { visible: 3, scroll: 2, immediate: 1, idle: 0 }[priority] || 0;
       }
       
       function needsRerender(pageNum) {
@@ -1084,35 +1068,11 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
                Math.abs(lastScale - scale) > 0.01;
       }
       
-      function needsRefetch(pageNum) {
-        return deletedPages.has(pageNum);
-      }
-      
-      function showSpinner(pageNum, isRefetch = false) {
+      function showSpinner(pageNum) {
         const pageInfo = pageElements.get(pageNum);
-        if (!pageInfo) return;
+        if (!pageInfo || !pageInfo.canvas) return;
         
-        if (isRefetch) {
-          // Re-fetching deleted page
-          const lastScale = pageZoomScales.get(pageNum);
-          
-          if (pageInfo.canvas) {
-            if (!lastScale || Math.abs(lastScale - scale) > 0.01) {
-              // Scale changed or no scale info - hide canvas
-              pageInfo.canvas.style.display = 'none';
-            } else {
-              // Same scale - dim canvas
-              pageInfo.canvas.classList.remove('needs-rerender');
-              pageInfo.canvas.classList.add('dimmed');
-            }
-          }
-        } else {
-          // Re-rendering at different scale
-          if (pageInfo.canvas) {
-            pageInfo.canvas.classList.add('needs-rerender');
-            pageInfo.canvas.classList.remove('dimmed');
-          }
-        }
+        pageInfo.canvas.classList.add('needs-rerender');
         
         if (!pageInfo.container.querySelector('.rerender-spinner')) {
           const spinner = document.createElement('div');
@@ -1130,8 +1090,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         
         if (pageInfo.canvas) {
           pageInfo.canvas.classList.remove('needs-rerender');
-          pageInfo.canvas.classList.remove('dimmed');
-          pageInfo.canvas.style.display = 'block';
         }
         
         const spinner = pageInfo.container.querySelector('.rerender-spinner');
@@ -1174,21 +1132,11 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         while (rerenderingPages.size < maxConcurrentRerenders && rerenderQueue.length > 0) {
           const pageNum = rerenderQueue.shift();
           
-          // Check if needs refetch first
-          if (needsRefetch(pageNum)) {
-            showSpinner(pageNum, true);
-            window.parent.postMessage({ 
-              type: 'requestPage', 
-              page: pageNum 
-            }, '*');
-            continue;
-          }
-          
           if (!needsRerender(pageNum)) continue;
           
           const priority = rerenderPriority.get(pageNum);
           
-          showSpinner(pageNum, false);
+          showSpinner(pageNum);
           
           rerenderingPages.set(pageNum, { priority });
           
@@ -1310,69 +1258,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         addToRerenderQueue(pages, priority || 'scroll');
       }
       
-      function deletePdfPage(pageNum) {
-        const data = pageData.get(pageNum);
-        if (!data) return;
-        
-        console.log('Deleting PDF page ' + pageNum + ' to free memory');
-        
-        // Delete PDF page object
-        if (data.page && data.page.cleanup) {
-          try {
-            data.page.cleanup();
-          } catch (e) {
-            console.error('Error cleaning up page ' + pageNum + ':', e);
-          }
-        }
-        
-        // Delete PDF document
-        if (data.pdf && data.pdf.destroy) {
-          try {
-            data.pdf.destroy();
-          } catch (e) {
-            console.error('Error destroying PDF ' + pageNum + ':', e);
-          }
-        }
-        
-        // Clear from pageData
-        pageData.delete(pageNum);
-        
-        // Mark page as deleted and needing re-fetch
-        deletedPages.add(pageNum);
-        
-        const pageInfo = pageElements.get(pageNum);
-        if (pageInfo) {
-          pageInfo.rendered = false;
-        }
-        
-        // Keep canvas for dimensions - DO NOT DELETE
-      }
-      
-      function cleanupPdfPages(centerPage) {
-        console.log('Cleanup triggered from page ' + centerPage + ', radius=' + memoryKeepRadius);
-        
-        let deletedCount = 0;
-        for (let i = 1; i <= totalPages; i++) {
-          const distance = Math.abs(i - centerPage);
-          
-          if (distance > memoryKeepRadius) {
-            if (pageData.has(i) && !deletedPages.has(i)) {
-              deletePdfPage(i);
-              deletedCount++;
-            }
-          }
-        }
-        
-        console.log('Cleanup complete: deleted ' + deletedCount + ' pages');
-        
-        window.parent.postMessage({
-          type: 'memoryCleanup',
-          deletedCount: deletedCount,
-          keptPages: (memoryKeepRadius * 2) + 1,
-          centerPage: centerPage
-        }, '*');
-      }
-      
       function init() {
         container = document.getElementById('pdf-container');
         pagesWrapper = document.getElementById('pages-wrapper');
@@ -1411,9 +1296,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             }, '*');
             
             visiblePages.forEach(pageNum => {
-              if (needsRefetch(pageNum)) {
-                addToRerenderQueue([pageNum], 'refetch');
-              } else if (needsRerender(pageNum)) {
+              if (needsRerender(pageNum)) {
                 addToRerenderQueue([pageNum], 'visible');
               }
             });
@@ -1611,13 +1494,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             
             queueDirectionalRerenders(currentPage, scrollState.lastDirection, idleRerenderCount, 'idle');
             
-            // Cleanup memory after scroll stops
-            if (cleanupAfterScroll) {
-              setTimeout(() => {
-                cleanupPdfPages(currentPage);
-              }, cleanupDelayMs);
-            }
-            
             window.parent.postMessage({
               type: 'scrollStopped',
               page: currentPage,
@@ -1734,7 +1610,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           });
           
           pageZoomScales.set(pageNum, scale);
-          deletedPages.delete(pageNum);
           
           loadingPages.delete(pageNum);
           
@@ -1930,13 +1805,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           isZooming = false;
           zoomIndicator.classList.remove('visible');
           window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
-          
-          // Cleanup memory after zoom
-          if (cleanupAfterZoom) {
-            setTimeout(() => {
-              cleanupPdfPages(currentPage);
-            }, cleanupDelayMs);
-          }
         }
       }
       
@@ -1980,13 +1848,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
                   setTimeout(() => {
                     queueImmediateRerenders(currentPage, immediateRerenderRadius);
                   }, 50);
-                }
-                
-                // Cleanup memory after zoom animation
-                if (cleanupAfterZoom) {
-                  setTimeout(() => {
-                    cleanupPdfPages(currentPage);
-                  }, cleanupDelayMs);
                 }
                 
                 resolve();
@@ -2239,13 +2100,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
                 isZooming = false;
                 zoomIndicator.classList.remove('visible');
                 window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
-                
-                // Cleanup memory after pinch zoom
-                if (cleanupAfterZoom) {
-                  setTimeout(() => {
-                    cleanupPdfPages(currentPage);
-                  }, cleanupDelayMs);
-                }
               }, 50);
             } else {
               isZooming = false;
@@ -2281,6 +2135,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
     _iframeElement.srcdoc = htmlContent;
   }
+
   Future<void> _loadInitialPages() async {
     if (_documentInfo == null) return;
 

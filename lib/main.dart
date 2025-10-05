@@ -164,7 +164,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           apiBaseUrl: url,
           title: "<untitled>",
           config: PdfViewerConfig(
-            enableDebugLogging: true,  // Shows cleanup logs in console
+            enableDebugLogging: true,
             maxConcurrentLoads: 2,
             enablePerformanceMonitoring: true,
             enableAutoRetry: true,
@@ -172,10 +172,8 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
         ),
       ),
     ).then((_) {
-      // Called when returning from PDF viewer
-      print('📱 Returned from PDF viewer - memory should be cleaned up');
-      print('💡 Check browser DevTools Console for cleanup logs');
-      print('💡 Check browser DevTools Memory tab to verify memory release');
+      print('📱 Returned from PDF viewer');
+      print('💡 Check browser console for cleanup logs');
     });
   }
 

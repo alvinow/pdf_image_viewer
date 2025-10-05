@@ -3,10 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:pdf_image_viewer/appconfig.dart';
 import 'package:pdf_image_viewer/screens/pdfviewerwebscreen.dart';
 
-
-
-
-
 void main() {
   runApp(const MyApp());
 }
@@ -79,7 +75,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
                         controller: _urlController,
                         decoration: const InputDecoration(
                           labelText: 'API Base URL',
-                          hintText: AppConfig.baseUrl ,
+                          hintText: AppConfig.baseUrl,
                           border: OutlineInputBorder(),
                           prefixIcon: Icon(Icons.link),
                         ),
@@ -168,20 +164,19 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           apiBaseUrl: url,
           title: "<untitled>",
           config: PdfViewerConfig(
-            enableDebugLogging: true,  // Aktifkan debug
-
-            cacheSize : 15,  // Increased untuk 5 halaman (current + 2 before + 2 after)
-            maxConcurrentLoads : 2,  // Increased untuk load lebih cepat
-            cacheWindowSize : 2,  // Set ke 2 untuk keep 2 pages around
-            cleanupInterval : const Duration(seconds: 15),
-            maxMemoryMB : 40,  // Increased karena cache lebih banyak
-            enablePerformanceMonitoring : true,
-            enableAutoRetry : true,
-
+            enableDebugLogging: true,  // Shows cleanup logs in console
+            maxConcurrentLoads: 2,
+            enablePerformanceMonitoring: true,
+            enableAutoRetry: true,
           ),
         ),
       ),
-    );
+    ).then((_) {
+      // Called when returning from PDF viewer
+      print('📱 Returned from PDF viewer - memory should be cleaned up');
+      print('💡 Check browser DevTools Console for cleanup logs');
+      print('💡 Check browser DevTools Memory tab to verify memory release');
+    });
   }
 
   void _addToRecent(String id, String url) {

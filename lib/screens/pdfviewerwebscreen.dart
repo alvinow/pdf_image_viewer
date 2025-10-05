@@ -10,7 +10,7 @@ import 'dart:typed_data';
 import '../services/pdf_api_service.dart';
 import '../models/document_info.dart';
 
-//so far paling oke
+// hampir bener, 10 % lagi
 
 // Separate widget class for the loading icon
 class PdfPageLoadingIcon extends StatefulWidget {
@@ -112,7 +112,8 @@ class PdfViewerConfig {
   final bool enablePerformanceMonitoring;
   final bool enableAutoRetry;
   final bool enableDebugLogging;
-  final double pinchZoomSensitivity;
+  final double pinchZoomSensitivityMobile;
+  final double pinchZoomSensitivityDesktop;
   final int fastScrollPageThreshold;
   final int slowScrollPrefetchCount;
   final int idlePrefetchAheadCount;
@@ -123,6 +124,7 @@ class PdfViewerConfig {
   final int immediateRerenderRadius;
   final int slowScrollRerenderCount;
   final int idleRerenderCount;
+  final int zoomRerenderNeighborRadius;
 
   // Memory management
   final int memoryKeepRadius;
@@ -135,7 +137,8 @@ class PdfViewerConfig {
     this.enablePerformanceMonitoring = true,
     this.enableAutoRetry = true,
     this.enableDebugLogging = false,
-    this.pinchZoomSensitivity = 0.02,
+    this.pinchZoomSensitivityMobile = 0.15,
+    this.pinchZoomSensitivityDesktop = 0.0000001,
     this.fastScrollPageThreshold = 5,
     this.slowScrollPrefetchCount = 8,
     this.idlePrefetchAheadCount = 5,
@@ -146,6 +149,7 @@ class PdfViewerConfig {
     this.immediateRerenderRadius = 0,
     this.slowScrollRerenderCount = 8,
     this.idleRerenderCount = 10,
+    this.zoomRerenderNeighborRadius = 2,
 
     // Memory defaults
     this.memoryKeepRadius = 5,
@@ -320,7 +324,9 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     _iframeElement = html.IFrameElement()
       ..style.border = 'none'
       ..style.width = '100%'
-      ..style.height = '100%';
+      ..style.height = '100%'
+    // ANDROID FIX: Add touch-action attribute
+      ..setAttribute('touch-action', 'pan-x pan-y pinch-zoom');
 
     // ignore: undefined_prefixed_name
     ui.platformViewRegistry.registerViewFactory(
@@ -809,6 +815,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       width: 100%;
       height: 100%;
       overflow: hidden;
+      /* ANDROID FIX: Add touch-action to html and body */
+      touch-action: pan-x pan-y pinch-zoom;
     }
     body {
       background: #525659;
@@ -822,6 +830,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       -webkit-overflow-scrolling: touch;
       scroll-behavior: auto;
       padding: 0 20px;
+      /* ANDROID FIX: Critical touch-action property */
+      touch-action: pan-x pan-y pinch-zoom;
+      /* ANDROID FIX: Disable momentum scrolling interference */
+      overscroll-behavior: contain;
     }
     #pages-wrapper {
       display: flex;
@@ -833,6 +845,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       transform-origin: center top;
       will-change: transform;
       transition: transform 0.15s cubic-bezier(0.4, 0.0, 0.2, 1);
+      /* ANDROID FIX: Allow touch gestures */
+      touch-action: pan-x pan-y pinch-zoom;
     }
     .page-container {
       position: relative;
@@ -844,6 +858,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       margin: 0 auto;
       max-width: 100%;
       transition: width 0.15s cubic-bezier(0.4, 0.0, 0.2, 1), height 0.15s cubic-bezier(0.4, 0.0, 0.2, 1);
+      /* ANDROID FIX: Enable touch on pages */
+      touch-action: pan-x pan-y pinch-zoom;
     }
     .page-container.loading {
       background: #f5f5f5;
@@ -853,6 +869,12 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       background: white;
       image-rendering: -webkit-optimize-contrast;
       image-rendering: crisp-edges;
+      /* ANDROID FIX: Allow all pan gestures and pinch zoom */
+      touch-action: pan-x pan-y pinch-zoom;
+      pointer-events: auto;
+      /* ANDROID FIX: Ensure canvas doesn't interfere with scrolling */
+      -webkit-user-select: none;
+      user-select: none;
     }
     canvas.needs-rerender {
       display: none;
@@ -868,6 +890,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       font-size: 12px;
       font-weight: 500;
       z-index: 10;
+      /* ANDROID FIX: Don't block touch events */
+      pointer-events: none;
     }
     .loading-spinner {
       color: #666;
@@ -877,6 +901,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       justify-content: center;
       width: 100%;
       height: 100%;
+      pointer-events: none;
     }
     .spinner-icon {
       width: 48px;
@@ -897,6 +922,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       height: 100%;
       background: white;
       z-index: 5;
+      pointer-events: none;
     }
     .page-indicator {
       position: fixed;
@@ -1012,13 +1038,14 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       const maxZoomMobile = 3.0;
       const maxZoomDesktop = 5.0;
       const maxZoom = isMobile ? maxZoomMobile : maxZoomDesktop;
-      const pinchZoomSensitivity = ''' + widget.config.pinchZoomSensitivity.toString() + r''';
+      const pinchZoomSensitivity = isMobile ? ''' + widget.config.pinchZoomSensitivityMobile.toString() + r''' : ''' + widget.config.pinchZoomSensitivityDesktop.toString() + r''';
       const fastScrollPageThreshold = ''' + fastScrollThreshold.toString() + r''';
       
       const maxConcurrentRerenders = ''' + maxConcurrentRerenders.toString() + r''';
       const immediateRerenderRadius = ''' + immediateRerenderRadius.toString() + r''';
       const slowScrollRerenderCount = ''' + slowScrollRerenderCount.toString() + r''';
       const idleRerenderCount = ''' + idleRerenderCount.toString() + r''';
+      const zoomRerenderNeighborRadius = ''' + widget.config.zoomRerenderNeighborRadius.toString() + r''';
 
       let container;
       let pagesWrapper;
@@ -1043,6 +1070,12 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       let pinchZoomScale = 1.0;
       
       const pageZoomScales = new Map();
+      
+      // Store original rendered dimensions for scaling calculations
+      const originalPageDimensions = new Map(); // pageNum -> { width, height, scale }
+      
+      // Track pages that need reload after deletion
+      const needsReload = new Set();
       
       // Priority queue system
       const rerenderQueue = [];
@@ -1275,6 +1308,15 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             
             if (entry.isIntersecting && entry.intersectionRatio >= 0.05) {
               visiblePages.push(pageNum);
+              
+              // Reload pages that were cleaned up during zoom
+              if (needsReload.has(pageNum)) {
+                needsReload.delete(pageNum);
+                window.parent.postMessage({ 
+                  type: 'requestPage', 
+                  page: pageNum 
+                }, '*');
+              }
             }
           });
           
@@ -1507,7 +1549,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               pageIndicator.classList.remove('visible');
             }
           }, 1500);
-        });
+        }, { passive: true }); // ANDROID FIX: Use passive listener
       }
       
       async function renderPage(pageNum, pdfData) {
@@ -1794,13 +1836,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           
           window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
           
-          await rerenderVisiblePages();
-          
-          if (immediateRerenderRadius > 0) {
-            setTimeout(() => {
-              queueImmediateRerenders(currentPage, immediateRerenderRadius);
-            }, 50);
-          }
+          // Clean up distant pages and re-render neighbors only
+          cleanupAndRerenderAfterZoom(currentPage, oldScale, newScale);
           
           isZooming = false;
           zoomIndicator.classList.remove('visible');
@@ -1842,13 +1879,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
               
               setTimeout(async () => {
-                await rerenderVisiblePages();
-                
-                if (immediateRerenderRadius > 0) {
-                  setTimeout(() => {
-                    queueImmediateRerenders(currentPage, immediateRerenderRadius);
-                  }, 50);
-                }
+                // Clean up distant pages and re-render neighbors only
+                cleanupAndRerenderAfterZoom(currentPage, startScale, endScale);
                 
                 resolve();
               }, 50);
@@ -1857,6 +1889,102 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           
           activeZoomAnimation = requestAnimationFrame(animate);
         });
+      }
+      
+      function cleanupAndRerenderAfterZoom(centerPage, oldScale, newScale) {
+        const scaleRatio = newScale / oldScale;
+        
+        // Define neighbor range to keep and re-render
+        const keepStart = centerPage - zoomRerenderNeighborRadius;
+        const keepEnd = centerPage + zoomRerenderNeighborRadius;
+        
+        const pagesToRerender = [];
+        const pagesToCleanup = [];
+        
+        // Categorize all pages
+        for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+          const pageInfo = pageElements.get(pageNum);
+          if (!pageInfo || !pageInfo.rendered) continue;
+          
+          const lastScale = pageZoomScales.get(pageNum);
+          const needsRerenderCheck = lastScale !== undefined && Math.abs(lastScale - newScale) > 0.01;
+          
+          if (!needsRerenderCheck) continue;
+          
+          // Keep and re-render neighbors
+          if (pageNum >= keepStart && pageNum <= keepEnd) {
+            pagesToRerender.push(pageNum);
+          } else {
+            // Cleanup distant pages
+            pagesToCleanup.push(pageNum);
+          }
+        }
+        
+        // Re-render neighbor pages immediately
+        for (const pageNum of pagesToRerender) {
+          rerenderPageForZoom(pageNum, newScale);
+        }
+        
+        // Cleanup distant pages
+        for (const pageNum of pagesToCleanup) {
+          const pageInfo = pageElements.get(pageNum);
+          const data = pageData.get(pageNum);
+          
+          if (!pageInfo) continue;
+          
+          // Store original dimensions before cleanup
+          if (data && data.viewport) {
+            originalPageDimensions.set(pageNum, {
+              width: data.viewport.width,
+              height: data.viewport.height,
+              scale: oldScale
+            });
+          }
+          
+          // Calculate new scaled dimensions
+          const originalDims = originalPageDimensions.get(pageNum);
+          if (originalDims) {
+            const scaledWidth = originalDims.width * scaleRatio;
+            const scaledHeight = originalDims.height * scaleRatio;
+            
+            // Update container size
+            pageInfo.container.style.width = scaledWidth + 'px';
+            pageInfo.container.style.height = scaledHeight + 'px';
+          }
+          
+          // Delete PDF objects and canvas
+          if (data) {
+            pageData.delete(pageNum);
+          }
+          
+          // Clear container and show loading spinner
+          pageInfo.container.innerHTML = '';
+          pageInfo.container.classList.add('loading');
+          
+          const spinner = document.createElement('div');
+          spinner.className = 'loading-spinner';
+          const spinnerIcon = document.createElement('div');
+          spinnerIcon.className = 'spinner-icon';
+          spinner.appendChild(spinnerIcon);
+          pageInfo.container.appendChild(spinner);
+          
+          const pageNumber = document.createElement('div');
+          pageNumber.className = 'page-number';
+          pageNumber.textContent = pageNum + ' / ' + totalPages;
+          pageInfo.container.appendChild(pageNumber);
+          
+          // Mark page info as not rendered
+          pageInfo.canvas = null;
+          pageInfo.pdf = null;
+          pageInfo.page = null;
+          pageInfo.rendered = false;
+          
+          // Mark for reload when scrolled to
+          needsReload.add(pageNum);
+          pageZoomScales.delete(pageNum);
+        }
+        
+        console.log('Zoom cleanup: Re-rendered ' + pagesToRerender.length + ' neighbors, cleaned up ' + pagesToCleanup.length + ' distant pages');
       }
       
       function applyZoomToAllPages(targetScale) {
@@ -1999,6 +2127,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         let pinchStarted = false;
         const pinchDeadZone = 15;
         
+        // ANDROID FIX: Use passive: false only where preventDefault is needed
         container.addEventListener('wheel', async (e) => {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
@@ -2010,6 +2139,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }
         }, { passive: false });
         
+        // ANDROID FIX: Conditional touch event handling
         container.addEventListener('touchstart', (e) => {
           if (e.touches.length === 2) {
             e.preventDefault();
@@ -2029,7 +2159,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             zoomIndicator.classList.add('visible');
             window.parent.postMessage({ type: 'zoomStateChanged', isZooming: true }, '*');
           }
-        }, { passive: false });
+          // ANDROID FIX: Don't interfere with single touch (scrolling)
+        }, { passive: false }); // Non-passive only for 2-finger pinch preventDefault
         
         container.addEventListener('touchmove', async (e) => {
           if (isPinching && e.touches.length === 2) {
@@ -2071,7 +2202,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             
             window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
           }
-        }, { passive: false });
+        }, { passive: false }); // ANDROID FIX: Non-passive for preventDefault
         
         container.addEventListener('touchend', async (e) => {
           if (isPinching && e.touches.length < 2) {
@@ -2107,7 +2238,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
             }
           }
-        }, { passive: false });
+        }, { passive: true }); // ANDROID FIX: Can be passive since no preventDefault
       }
       
       window.addEventListener('message', async (event) => {

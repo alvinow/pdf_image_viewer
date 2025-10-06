@@ -165,9 +165,6 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
           title: "<untitled>",
           config: PdfViewerConfig(
             enableDebugLogging: true,
-            maxConcurrentLoads: 2,
-            enablePerformanceMonitoring: true,
-            enableAutoRetry: true,
           ),
         ),
       ),

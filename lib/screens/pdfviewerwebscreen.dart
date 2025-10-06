@@ -10,9 +10,6 @@ import 'dart:typed_data';
 import '../services/pdf_api_service.dart';
 import '../models/document_info.dart';
 
-// hampir bener, 10 % lagi
-
-// Separate widget class for the loading icon
 class PdfPageLoadingIcon extends StatefulWidget {
   final double size;
   final Color? color;
@@ -124,7 +121,8 @@ class PdfViewerConfig {
   final int immediateRerenderRadius;
   final int slowScrollRerenderCount;
   final int idleRerenderCount;
-  final int zoomRerenderNeighborRadius;
+  final int zoomRerenderVisibleNeighborRadius;
+  final int zoomDebounceMs;
 
   // Memory management
   final int memoryKeepRadius;
@@ -149,7 +147,8 @@ class PdfViewerConfig {
     this.immediateRerenderRadius = 0,
     this.slowScrollRerenderCount = 8,
     this.idleRerenderCount = 10,
-    this.zoomRerenderNeighborRadius = 2,
+    this.zoomRerenderVisibleNeighborRadius = 1,
+    this.zoomDebounceMs = 150,
 
     // Memory defaults
     this.memoryKeepRadius = 5,
@@ -243,9 +242,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   double _zoomLevel = 1.0;
   int _rotationDegrees = 0;
 
-  // ADD THESE MISSING VARIABLES:
   double _scrollVelocity = 0.0;
-  String _scrollDirection = 'none'; // 'up', 'down', 'none'
+  String _scrollDirection = 'none';
   Timer? _idleScrollTimer;
   bool _isScrollIdle = true;
 
@@ -325,7 +323,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       ..style.border = 'none'
       ..style.width = '100%'
       ..style.height = '100%'
-    // ANDROID FIX: Add touch-action attribute
       ..setAttribute('touch-action', 'pan-x pan-y pinch-zoom');
 
     // ignore: undefined_prefixed_name
@@ -409,6 +406,22 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             if (pageNum != null) {
               _ensurePageLoaded(pageNum);
             }
+          }
+          break;
+
+        case 'pagesDeleted':
+          final pages = data['pages'];
+          if (pages is List) {
+            setState(() {
+              for (final page in pages) {
+                final pageNum = page is int ? page : int.tryParse(page.toString());
+                if (pageNum != null) {
+                  _loadedPages.remove(pageNum);
+                  _debugLog('Removed page $pageNum from loaded set');
+                }
+              }
+            });
+            _debugLog('Batch deleted ${pages.length} pages from memory');
           }
           break;
 
@@ -514,12 +527,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         _debugLog('Fast scrolling detected - canceling all loads');
         _cancelAllLoads();
       } else {
-        // Slow scroll - prefetch based on direction
         _debugLog('Slow scroll detected (direction: $_scrollDirection)');
         _loadPriorityPages(_currentPage);
       }
     } else {
-      // Start idle timer
       _idleScrollTimer?.cancel();
       _idleScrollTimer = Timer(const Duration(milliseconds: 500), () {
         if (mounted) {
@@ -555,12 +566,11 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
     final pagesToPrefetch = <int>[];
     final totalPages = _documentInfo!.totalPages;
-    final aheadCount = widget.config.idlePrefetchAheadCount;    // Use config
-    final behindCount = widget.config.idlePrefetchBehindCount;  // Use config
+    final aheadCount = widget.config.idlePrefetchAheadCount;
+    final behindCount = widget.config.idlePrefetchBehindCount;
 
     if (_scrollDirection == 'down') {
-      // User scrolling down - prioritize pages ahead
-      for (int i = 1; i <= aheadCount; i++) { // Use config value
+      for (int i = 1; i <= aheadCount; i++) {
         final page = centerPage + i;
         if (page <= totalPages && page >= 1 &&
             !_loadedPages.contains(page) &&
@@ -568,8 +578,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           pagesToPrefetch.add(page);
         }
       }
-      // Also prefetch pages behind
-      for (int i = 1; i <= behindCount; i++) { // Use config value
+      for (int i = 1; i <= behindCount; i++) {
         final page = centerPage - i;
         if (page >= 1 && page <= totalPages &&
             !_loadedPages.contains(page) &&
@@ -578,8 +587,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         }
       }
     } else if (_scrollDirection == 'up') {
-      // User scrolling up - prioritize pages behind
-      for (int i = 1; i <= aheadCount; i++) { // Use config value
+      for (int i = 1; i <= aheadCount; i++) {
         final page = centerPage - i;
         if (page >= 1 && page <= totalPages &&
             !_loadedPages.contains(page) &&
@@ -587,8 +595,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           pagesToPrefetch.add(page);
         }
       }
-      // Also prefetch pages ahead
-      for (int i = 1; i <= behindCount; i++) { // Use config value
+      for (int i = 1; i <= behindCount; i++) {
         final page = centerPage + i;
         if (page <= totalPages && page >= 1 &&
             !_loadedPages.contains(page) &&
@@ -597,8 +604,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         }
       }
     } else {
-      // No clear direction - prefetch symmetrically
-      for (int i = 1; i <= aheadCount; i++) { // Use config value
+      for (int i = 1; i <= aheadCount; i++) {
         final nextPage = centerPage + i;
         final prevPage = centerPage - i;
 
@@ -630,7 +636,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     final totalPages = _documentInfo!.totalPages;
     final prefetchCount = widget.config.slowScrollPrefetchCount;
 
-    // Current page first
     if (!_loadedPages.contains(currentPage) && !_loadingPages.contains(currentPage)) {
       pagesToLoad.add(currentPage);
     }
@@ -688,7 +693,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
     _debugLog('Loading priority pages: $pagesToLoad (direction: $_scrollDirection)');
 
-    // FIX: Use queue system to respect maxConcurrentLoads
     for (final page in pagesToLoad) {
       _queuePageLoad(page);
     }
@@ -815,7 +819,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       width: 100%;
       height: 100%;
       overflow: hidden;
-      /* ANDROID FIX: Add touch-action to html and body */
       touch-action: pan-x pan-y pinch-zoom;
     }
     body {
@@ -830,9 +833,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       -webkit-overflow-scrolling: touch;
       scroll-behavior: auto;
       padding: 0 20px;
-      /* ANDROID FIX: Critical touch-action property */
       touch-action: pan-x pan-y pinch-zoom;
-      /* ANDROID FIX: Disable momentum scrolling interference */
       overscroll-behavior: contain;
     }
     #pages-wrapper {
@@ -845,7 +846,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       transform-origin: center top;
       will-change: transform;
       transition: transform 0.15s cubic-bezier(0.4, 0.0, 0.2, 1);
-      /* ANDROID FIX: Allow touch gestures */
       touch-action: pan-x pan-y pinch-zoom;
     }
     .page-container {
@@ -858,7 +858,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       margin: 0 auto;
       max-width: 100%;
       transition: width 0.15s cubic-bezier(0.4, 0.0, 0.2, 1), height 0.15s cubic-bezier(0.4, 0.0, 0.2, 1);
-      /* ANDROID FIX: Enable touch on pages */
       touch-action: pan-x pan-y pinch-zoom;
     }
     .page-container.loading {
@@ -869,10 +868,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       background: white;
       image-rendering: -webkit-optimize-contrast;
       image-rendering: crisp-edges;
-      /* ANDROID FIX: Allow all pan gestures and pinch zoom */
       touch-action: pan-x pan-y pinch-zoom;
       pointer-events: auto;
-      /* ANDROID FIX: Ensure canvas doesn't interfere with scrolling */
       -webkit-user-select: none;
       user-select: none;
     }
@@ -890,7 +887,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       font-size: 12px;
       font-weight: 500;
       z-index: 10;
-      /* ANDROID FIX: Don't block touch events */
       pointer-events: none;
     }
     .loading-spinner {
@@ -1045,7 +1041,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       const immediateRerenderRadius = ''' + immediateRerenderRadius.toString() + r''';
       const slowScrollRerenderCount = ''' + slowScrollRerenderCount.toString() + r''';
       const idleRerenderCount = ''' + idleRerenderCount.toString() + r''';
-      const zoomRerenderNeighborRadius = ''' + widget.config.zoomRerenderNeighborRadius.toString() + r''';
+      const zoomRerenderVisibleNeighborRadius = ''' + widget.config.zoomRerenderVisibleNeighborRadius.toString() + r''';
+      const zoomDebounceMs = ''' + widget.config.zoomDebounceMs.toString() + r''';
 
       let container;
       let pagesWrapper;
@@ -1071,16 +1068,18 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       
       const pageZoomScales = new Map();
       
-      // Store original rendered dimensions for scaling calculations
-      const originalPageDimensions = new Map(); // pageNum -> { width, height, scale }
-      
-      // Track pages that need reload after deletion
+      const originalPageDimensions = new Map();
       const needsReload = new Set();
       
-      // Priority queue system
+      let currentVisiblePages = [];
+      let lastVisiblePagesSnapshot = [];
+      
+      let zoomDebounceTimer = null;
+      let pendingZoomCleanup = null;
+      
       const rerenderQueue = [];
       const rerenderPriority = new Map();
-      const rerenderingPages = new Map(); // pageNum -> { priority, renderTask }
+      const rerenderingPages = new Map();
       let lastRerenderDirection = 'none';
       let isFastScrolling = false;
       let isScrollingNow = false;
@@ -1291,6 +1290,121 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         addToRerenderQueue(pages, priority || 'scroll');
       }
       
+      function visiblePagesChanged() {
+        const currentSet = new Set(currentVisiblePages);
+        const previousSet = new Set(lastVisiblePagesSnapshot);
+        
+        const added = [...currentSet].filter(p => !previousSet.has(p));
+        const removed = [...previousSet].filter(p => !currentSet.has(p));
+        
+        const hasSignificantChange = added.length > 2 || removed.length > 2;
+        
+        return hasSignificantChange;
+      }
+      
+      function cleanupAndRerenderAfterZoom(visiblePages, oldScale, newScale) {
+        if (visiblePages.length === 0) {
+          console.log('No visible pages during zoom, waiting for visibility...');
+          return;
+        }
+        
+        const scaleRatio = newScale / oldScale;
+        
+        const pagesToRerender = new Set();
+        for (const visiblePage of visiblePages) {
+          pagesToRerender.add(visiblePage);
+          if (visiblePage - 1 >= 1) {
+            pagesToRerender.add(visiblePage - 1);
+          }
+          if (visiblePage + 1 <= totalPages) {
+            pagesToRerender.add(visiblePage + 1);
+          }
+        }
+        
+        const pagesToCleanup = [];
+        
+        for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+          const pageInfo = pageElements.get(pageNum);
+          if (!pageInfo || !pageInfo.rendered) continue;
+          
+          const lastScale = pageZoomScales.get(pageNum);
+          const needsRerenderCheck = lastScale !== undefined && Math.abs(lastScale - newScale) > 0.01;
+          
+          if (!needsRerenderCheck) continue;
+          
+          if (!pagesToRerender.has(pageNum)) {
+            pagesToCleanup.push(pageNum);
+          }
+        }
+        
+        for (const pageNum of pagesToRerender) {
+          rerenderPageForZoom(pageNum, newScale);
+        }
+        
+        for (const pageNum of pagesToCleanup) {
+          const pageInfo = pageElements.get(pageNum);
+          const data = pageData.get(pageNum);
+          
+          if (!pageInfo) continue;
+          
+          if (data && data.viewport) {
+            originalPageDimensions.set(pageNum, {
+              width: data.viewport.width,
+              height: data.viewport.height,
+              scale: oldScale
+            });
+          }
+          
+          const originalDims = originalPageDimensions.get(pageNum);
+          if (originalDims) {
+            const scaledWidth = originalDims.width * scaleRatio;
+            const scaledHeight = originalDims.height * scaleRatio;
+            
+            pageInfo.container.style.width = scaledWidth + 'px';
+            pageInfo.container.style.height = scaledHeight + 'px';
+          }
+          
+          if (data) {
+            pageData.delete(pageNum);
+          }
+          
+          pageInfo.container.innerHTML = '';
+          pageInfo.container.classList.add('loading');
+          
+          const spinner = document.createElement('div');
+          spinner.className = 'loading-spinner';
+          const spinnerIcon = document.createElement('div');
+          spinnerIcon.className = 'spinner-icon';
+          spinner.appendChild(spinnerIcon);
+          pageInfo.container.appendChild(spinner);
+          
+          const pageNumber = document.createElement('div');
+          pageNumber.className = 'page-number';
+          pageNumber.textContent = pageNum + ' / ' + totalPages;
+          pageInfo.container.appendChild(pageNumber);
+          
+          pageInfo.canvas = null;
+          pageInfo.pdf = null;
+          pageInfo.page = null;
+          pageInfo.rendered = false;
+          
+          needsReload.add(pageNum);
+          pageZoomScales.delete(pageNum);
+        }
+        
+        if (pagesToCleanup.length > 0) {
+          window.parent.postMessage({ 
+            type: 'pagesDeleted', 
+            pages: pagesToCleanup 
+          }, '*');
+          
+          // Ensure all deleted pages have correct container sizes for current zoom
+          updateDeletedPagesContainerSizes(newScale);
+        }
+        
+        console.log('Zoom cleanup: Re-rendered ' + pagesToRerender.size + ' visible+neighbors, cleaned up ' + pagesToCleanup.length + ' distant pages');
+      }
+      
       function init() {
         container = document.getElementById('pdf-container');
         pagesWrapper = document.getElementById('pages-wrapper');
@@ -1309,7 +1423,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             if (entry.isIntersecting && entry.intersectionRatio >= 0.05) {
               visiblePages.push(pageNum);
               
-              // Reload pages that were cleaned up during zoom
               if (needsReload.has(pageNum)) {
                 needsReload.delete(pageNum);
                 window.parent.postMessage({ 
@@ -1321,6 +1434,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           });
           
           if (visiblePages.length > 0) {
+            currentVisiblePages = visiblePages;
+            
             const newCurrentPage = Math.min(...visiblePages);
             if (newCurrentPage !== currentPage) {
               currentPage = newCurrentPage;
@@ -1417,27 +1532,34 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       function getCurrentVisiblePage() {
         const containerRect = container.getBoundingClientRect();
         const containerTop = containerRect.top;
-        const containerHeight = containerRect.height;
-        const containerCenter = containerTop + (containerHeight / 2);
-        
-        let bestCandidate = currentPage;
-        let smallestDistance = Infinity;
+        const containerBottom = containerRect.bottom;
         
         for (let i = 1; i <= totalPages; i++) {
           const pageContainer = document.getElementById('page-' + i);
           if (!pageContainer) continue;
           
           const pageRect = pageContainer.getBoundingClientRect();
-          const pageCenter = pageRect.top + (pageRect.height / 2);
-          const distanceFromCenter = Math.abs(pageCenter - containerCenter);
+          const pageTop = pageRect.top;
+          const pageBottom = pageRect.bottom;
+          const pageHeight = pageRect.height;
           
-          if (distanceFromCenter < smallestDistance) {
-            smallestDistance = distanceFromCenter;
-            bestCandidate = i;
+          // Check if page is visible in viewport
+          if (pageBottom > containerTop && pageTop < containerBottom) {
+            // Calculate how much of page is scrolled past viewport top
+            const scrolledPast = Math.max(0, containerTop - pageTop);
+            const scrolledPastPercentage = (scrolledPast / pageHeight) * 100;
+            
+            // If more than 90% scrolled past (less than 10% remaining), skip to next page
+            if (scrolledPastPercentage > 90) {
+              continue;
+            }
+            
+            // This is the uppermost visible page with >10% remaining
+            return i;
           }
         }
         
-        return bestCandidate;
+        return currentPage; // Fallback to current if no page found
       }
 
       function setupScrollListener() {
@@ -1549,7 +1671,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               pageIndicator.classList.remove('visible');
             }
           }, 1500);
-        }, { passive: true }); // ANDROID FIX: Use passive listener
+        }, { passive: true });
       }
       
       async function renderPage(pageNum, pdfData) {
@@ -1685,6 +1807,20 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         
         const viewport = page.getViewport({ scale: finalScale, rotation: currentRotation });
         
+        // Pre-scale old canvas to show immediate size change
+        const oldCanvas = pageInfo.canvas;
+        const oldScale = pageZoomScales.get(pageNum);
+        
+        if (oldCanvas && oldScale) {
+          const scaleRatio = targetScale / oldScale;
+          console.log('Page', pageNum, '- Scaling canvas:', 'oldScale:', oldScale, 'targetScale:', targetScale, 'ratio:', scaleRatio);
+          oldCanvas.style.transform = `scale(${scaleRatio})`;
+          oldCanvas.style.transformOrigin = 'top left';
+          oldCanvas.style.imageRendering = 'auto';
+        } else {
+          console.log('Page', pageNum, '- Cannot scale:', 'hasCanvas:', !!oldCanvas, 'hasOldScale:', !!oldScale);
+        }
+        
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d', { 
           alpha: false,
@@ -1714,16 +1850,24 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           requestAnimationFrame(() => {
             const pageNumberDiv = pageInfo.container.querySelector('.page-number');
             
-            pageInfo.container.innerHTML = '';
+            // Update container dimensions
+            pageInfo.container.style.width = viewport.width + 'px';
+            pageInfo.container.style.height = viewport.height + 'px';
+            
+            // Add new sharp canvas
             pageInfo.container.appendChild(canvas);
             
+            // Remove old scaled canvas
+            if (oldCanvas && oldCanvas !== canvas) {
+              oldCanvas.remove();
+            }
+            
+            // Re-add page number on top
             if (pageNumberDiv) {
               pageInfo.container.appendChild(pageNumberDiv);
             }
             
-            pageInfo.container.style.width = viewport.width + 'px';
-            pageInfo.container.style.height = viewport.height + 'px';
-            
+            // Update references
             pageInfo.canvas = canvas;
             data.canvas = canvas;
             data.viewport = viewport;
@@ -1836,13 +1980,27 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           
           window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
           
-          // Clean up distant pages and re-render neighbors only
-          cleanupAndRerenderAfterZoom(currentPage, oldScale, newScale);
+          debouncedZoomCleanup(currentVisiblePages, oldScale, newScale);
           
           isZooming = false;
           zoomIndicator.classList.remove('visible');
           window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
         }
+      }
+      
+      function debouncedZoomCleanup(visiblePages, oldScale, newScale) {
+        clearTimeout(zoomDebounceTimer);
+        
+        lastVisiblePagesSnapshot = [...visiblePages];
+        
+        zoomDebounceTimer = setTimeout(() => {
+          if (visiblePagesChanged()) {
+            console.log('Visible pages changed significantly during debounce, canceling cleanup');
+            return;
+          }
+          
+          cleanupAndRerenderAfterZoom(lastVisiblePagesSnapshot, oldScale, newScale);
+        }, zoomDebounceMs);
       }
       
       async function animateZoomSmooth(startScale, endScale, scrollAnchor, currentPageEl) {
@@ -1878,10 +2036,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               zoomIndicator.classList.remove('visible');
               window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
               
-              setTimeout(async () => {
-                // Clean up distant pages and re-render neighbors only
-                cleanupAndRerenderAfterZoom(currentPage, startScale, endScale);
-                
+              setTimeout(() => {
+                debouncedZoomCleanup(currentVisiblePages, startScale, endScale);
                 resolve();
               }, 50);
             }
@@ -1891,100 +2047,39 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         });
       }
       
-      function cleanupAndRerenderAfterZoom(centerPage, oldScale, newScale) {
-        const scaleRatio = newScale / oldScale;
+      function updateDeletedPagesContainerSizes(targetScale) {
+        const baseScale = isMobile ? 1.2 : 1.5;
+        const finalScale = targetScale * baseScale;
         
-        // Define neighbor range to keep and re-render
-        const keepStart = centerPage - zoomRerenderNeighborRadius;
-        const keepEnd = centerPage + zoomRerenderNeighborRadius;
-        
-        const pagesToRerender = [];
-        const pagesToCleanup = [];
-        
-        // Categorize all pages
-        for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+        for (const pageNum of needsReload) {
           const pageInfo = pageElements.get(pageNum);
-          if (!pageInfo || !pageInfo.rendered) continue;
+          if (!pageInfo || !pageInfo.dimensions) continue;
           
-          const lastScale = pageZoomScales.get(pageNum);
-          const needsRerenderCheck = lastScale !== undefined && Math.abs(lastScale - newScale) > 0.01;
+          const pageDim = pageInfo.dimensions;
           
-          if (!needsRerenderCheck) continue;
+          let widthPt = pageDim.width;
+          let heightPt = pageDim.height;
           
-          // Keep and re-render neighbors
-          if (pageNum >= keepStart && pageNum <= keepEnd) {
-            pagesToRerender.push(pageNum);
+          if (pageDim.unit === 'mm') {
+            widthPt = pageDim.width * 2.83465;
+            heightPt = pageDim.height * 2.83465;
+          } else if (pageDim.unit === 'in') {
+            widthPt = pageDim.width * 72;
+            heightPt = pageDim.height * 72;
+          }
+          
+          let displayWidth, displayHeight;
+          if (currentRotation === 90 || currentRotation === 270) {
+            displayWidth = heightPt * finalScale;
+            displayHeight = widthPt * finalScale;
           } else {
-            // Cleanup distant pages
-            pagesToCleanup.push(pageNum);
+            displayWidth = widthPt * finalScale;
+            displayHeight = heightPt * finalScale;
           }
+          
+          pageInfo.container.style.width = displayWidth + 'px';
+          pageInfo.container.style.height = displayHeight + 'px';
         }
-        
-        // Re-render neighbor pages immediately
-        for (const pageNum of pagesToRerender) {
-          rerenderPageForZoom(pageNum, newScale);
-        }
-        
-        // Cleanup distant pages
-        for (const pageNum of pagesToCleanup) {
-          const pageInfo = pageElements.get(pageNum);
-          const data = pageData.get(pageNum);
-          
-          if (!pageInfo) continue;
-          
-          // Store original dimensions before cleanup
-          if (data && data.viewport) {
-            originalPageDimensions.set(pageNum, {
-              width: data.viewport.width,
-              height: data.viewport.height,
-              scale: oldScale
-            });
-          }
-          
-          // Calculate new scaled dimensions
-          const originalDims = originalPageDimensions.get(pageNum);
-          if (originalDims) {
-            const scaledWidth = originalDims.width * scaleRatio;
-            const scaledHeight = originalDims.height * scaleRatio;
-            
-            // Update container size
-            pageInfo.container.style.width = scaledWidth + 'px';
-            pageInfo.container.style.height = scaledHeight + 'px';
-          }
-          
-          // Delete PDF objects and canvas
-          if (data) {
-            pageData.delete(pageNum);
-          }
-          
-          // Clear container and show loading spinner
-          pageInfo.container.innerHTML = '';
-          pageInfo.container.classList.add('loading');
-          
-          const spinner = document.createElement('div');
-          spinner.className = 'loading-spinner';
-          const spinnerIcon = document.createElement('div');
-          spinnerIcon.className = 'spinner-icon';
-          spinner.appendChild(spinnerIcon);
-          pageInfo.container.appendChild(spinner);
-          
-          const pageNumber = document.createElement('div');
-          pageNumber.className = 'page-number';
-          pageNumber.textContent = pageNum + ' / ' + totalPages;
-          pageInfo.container.appendChild(pageNumber);
-          
-          // Mark page info as not rendered
-          pageInfo.canvas = null;
-          pageInfo.pdf = null;
-          pageInfo.page = null;
-          pageInfo.rendered = false;
-          
-          // Mark for reload when scrolled to
-          needsReload.add(pageNum);
-          pageZoomScales.delete(pageNum);
-        }
-        
-        console.log('Zoom cleanup: Re-rendered ' + pagesToRerender.length + ' neighbors, cleaned up ' + pagesToCleanup.length + ' distant pages');
       }
       
       function applyZoomToAllPages(targetScale) {
@@ -2020,23 +2115,9 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             pageInfo.container.style.height = displayHeight + 'px';
           }
         }
-      }
-      
-      async function rerenderVisiblePages() {
-        const containerRect = container.getBoundingClientRect();
-        const renderPromises = [];
         
-        for (const [pageNum, data] of pageData) {
-          const pageEl = document.getElementById('page-' + pageNum);
-          if (pageEl) {
-            const rect = pageEl.getBoundingClientRect();
-            if (rect.bottom > containerRect.top && rect.top < containerRect.bottom) {
-              renderPromises.push(rerenderPageForZoom(pageNum, scale));
-            }
-          }
-        }
-        
-        await Promise.all(renderPromises);
+        // Update deleted pages container sizes to match current zoom
+        updateDeletedPagesContainerSizes(targetScale);
       }
 
       function scrollToPage(pageNum) {
@@ -2127,7 +2208,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         let pinchStarted = false;
         const pinchDeadZone = 15;
         
-        // ANDROID FIX: Use passive: false only where preventDefault is needed
         container.addEventListener('wheel', async (e) => {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
@@ -2139,7 +2219,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }
         }, { passive: false });
         
-        // ANDROID FIX: Conditional touch event handling
         container.addEventListener('touchstart', (e) => {
           if (e.touches.length === 2) {
             e.preventDefault();
@@ -2159,8 +2238,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             zoomIndicator.classList.add('visible');
             window.parent.postMessage({ type: 'zoomStateChanged', isZooming: true }, '*');
           }
-          // ANDROID FIX: Don't interfere with single touch (scrolling)
-        }, { passive: false }); // Non-passive only for 2-finger pinch preventDefault
+        }, { passive: false });
         
         container.addEventListener('touchmove', async (e) => {
           if (isPinching && e.touches.length === 2) {
@@ -2202,7 +2280,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             
             window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
           }
-        }, { passive: false }); // ANDROID FIX: Non-passive for preventDefault
+        }, { passive: false });
         
         container.addEventListener('touchend', async (e) => {
           if (isPinching && e.touches.length < 2) {
@@ -2219,14 +2297,11 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               isPinchZooming = false;
               pinchZoomScale = 1.0;
               
-              setTimeout(async () => {
-                await rerenderVisiblePages();
-                
-                if (immediateRerenderRadius > 0) {
-                  setTimeout(() => {
-                    queueImmediateRerenders(currentPage, immediateRerenderRadius);
-                  }, 50);
-                }
+              const finalScale = scale;
+              const startScale = pinchStartScale;
+              
+              setTimeout(() => {
+                debouncedZoomCleanup(currentVisiblePages, startScale, finalScale);
                 
                 isZooming = false;
                 zoomIndicator.classList.remove('visible');
@@ -2238,7 +2313,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
             }
           }
-        }, { passive: true }); // ANDROID FIX: Can be passive since no preventDefault
+        }, { passive: true });
       }
       
       window.addEventListener('message', async (event) => {
@@ -2281,7 +2356,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   }
 
   void _queuePageLoad(int pageNumber) {
-    // Add boundary check FIRST
     if (_documentInfo != null && (pageNumber < 1 || pageNumber > _documentInfo!.totalPages)) {
       _debugLog('Skipping invalid page number: $pageNumber (total pages: ${_documentInfo!.totalPages})');
       return;
@@ -2326,7 +2400,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     try {
       _performanceMonitor.startPageLoad(pageNumber);
 
-      // Browser handles all caching automatically via Cache-Control headers
       final pageData = await _apiService.getPageAsPdf(widget.documentId, pageNumber)
           .timeout(const Duration(seconds: 30));
 
@@ -2348,9 +2421,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       _loadingPages.remove(pageNumber);
       _performanceMonitor.endPageLoad(pageNumber);
 
-      // Retry with backoff
-      Future.delayed(const Duration(seconds: 3), ()
-      {
+      Future.delayed(const Duration(seconds: 3), () {
         if (mounted && !_isFastScrolling) {
           _queuePageLoad(pageNumber);
         }
@@ -2775,7 +2846,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     _visiblePageCheckTimer?.cancel();
     _memoryStatsTimer?.cancel();
     _pageController.dispose();
-    _pageFocusNode.dispose();
+    _pageFocusNode.unfocus();
 
     if (widget.config.enablePerformanceMonitoring) {
       final metrics = _performanceMonitor.getMetrics();

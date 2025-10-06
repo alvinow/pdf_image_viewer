@@ -10,7 +10,7 @@ import 'dart:typed_data';
 import '../services/pdf_api_service.dart';
 import '../models/document_info.dart';
 
-//udah oke tapi page info nya masih ngaco
+//mayan tapi kadang masih error
 
 class PdfPageLoadingIcon extends StatefulWidget {
   final double size;
@@ -178,60 +178,6 @@ class PdfViewerWebScreen extends StatefulWidget {
 
   @override
   State<PdfViewerWebScreen> createState() => _PdfViewerWebScreenState();
-}
-
-class _PdfPerformanceMonitor {
-  final Map<int, DateTime> _loadStartTimes = {};
-  final Map<int, int> _loadDurations = {};
-  final List<double> _zoomLevels = [];
-  final List<int> _pageViewDurations = [];
-  DateTime? _sessionStart;
-
-  void startSession() {
-    _sessionStart = DateTime.now();
-  }
-
-  void startPageLoad(int page) {
-    _loadStartTimes[page] = DateTime.now();
-  }
-
-  void endPageLoad(int page) {
-    final start = _loadStartTimes[page];
-    if (start != null) {
-      final duration = DateTime.now().difference(start);
-      _loadDurations[page] = duration.inMilliseconds;
-      _loadStartTimes.remove(page);
-      print('Page $page loaded in ${duration.inMilliseconds}ms');
-    }
-  }
-
-  void recordZoom(double zoomLevel) {
-    _zoomLevels.add(zoomLevel);
-  }
-
-  void recordPageView(int page, Duration duration) {
-    _pageViewDurations.add(duration.inSeconds);
-  }
-
-  Map<String, dynamic> getMetrics() {
-    final avgLoadTime = _loadDurations.values.isEmpty
-        ? 0
-        : _loadDurations.values.reduce((a, b) => a + b) / _loadDurations.values.length;
-
-    final avgViewTime = _pageViewDurations.isEmpty
-        ? 0
-        : _pageViewDurations.reduce((a, b) => a + b) / _pageViewDurations.length;
-
-    return {
-      'totalPagesLoaded': _loadDurations.length,
-      'averageLoadTimeMs': avgLoadTime.round(),
-      'averageViewTimeSeconds': avgViewTime.round(),
-      'zoomLevelsUsed': _zoomLevels.length,
-      'sessionDuration': _sessionStart != null
-          ? DateTime.now().difference(_sessionStart!).inSeconds
-          : 0,
-    };
-  }
 }
 
 class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
@@ -436,21 +382,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
                 _zoomLevel = zoomValue;
               });
               _performanceMonitor.recordZoom(zoomValue);
-            }
-          }
-          break;
-
-        case 'currentPageReport':
-          final page = data['page'];
-          if (page != null) {
-            final pageNum = page is int ? page : int.tryParse(page.toString());
-            if (pageNum != null && pageNum != _currentPage) {
-              setState(() {
-                _currentPage = pageNum;
-                if (!_isEditingPage) {
-                  _pageController.text = pageNum.toString();
-                }
-              });
             }
           }
           break;
@@ -1069,16 +1000,12 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       let pinchZoomScale = 1.0;
       
       const pageZoomScales = new Map();
-      
-      const originalPageDimensions = new Map();
       const needsReload = new Set();
       
-      // Use Set for better performance
       let currentVisiblePages = new Set();
       let lastVisiblePagesSnapshot = [];
       
       let zoomDebounceTimer = null;
-      let pendingZoomCleanup = null;
       
       const rerenderQueue = [];
       const rerenderPriority = new Map();
@@ -1235,22 +1162,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         lastRerenderDirection = newDirection;
       }
       
-      function queueImmediateRerenders(centerPage, radius) {
-        if (isScrollingNow) {
-          return;
-        }
-        
-        const pages = [];
-        for (let i = -radius; i <= radius; i++) {
-          if (i === 0) continue;
-          const page = centerPage + i;
-          if (page >= 1 && page <= totalPages && needsRerender(page)) {
-            pages.push(page);
-          }
-        }
-        addToRerenderQueue(pages, 'immediate');
-      }
-      
       function queueDirectionalRerenders(centerPage, direction, count, priority) {
         const pages = [];
         
@@ -1306,118 +1217,179 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       }
       
       function cleanupAndRerenderAfterZoom(visiblePages, oldScale, newScale) {
-        if (visiblePages.length === 0) {
-          console.log('No visible pages during zoom, waiting for visibility...');
-          return;
-        }
-        
-        const scaleRatio = newScale / oldScale;
-        
-        const pagesToRerender = new Set();
-        for (const visiblePage of visiblePages) {
-          pagesToRerender.add(visiblePage);
-          if (visiblePage - 1 >= 1) {
-            pagesToRerender.add(visiblePage - 1);
-          }
-          if (visiblePage + 1 <= totalPages) {
-            pagesToRerender.add(visiblePage + 1);
-          }
-        }
-        
-        const pagesToCleanup = [];
-        
-        for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-          const pageInfo = pageElements.get(pageNum);
-          if (!pageInfo || !pageInfo.rendered) continue;
-          
-          const lastScale = pageZoomScales.get(pageNum);
-          const needsRerenderCheck = lastScale !== undefined && Math.abs(lastScale - newScale) > 0.01;
-          
-          if (!needsRerenderCheck) continue;
-          
-          if (!pagesToRerender.has(pageNum)) {
-            pagesToCleanup.push(pageNum);
-          }
-        }
-        
-        for (const pageNum of pagesToRerender) {
-          rerenderPageForZoom(pageNum, newScale);
-        }
-        
-        for (const pageNum of pagesToCleanup) {
-          const pageInfo = pageElements.get(pageNum);
-          const data = pageData.get(pageNum);
-          
-          if (!pageInfo) continue;
-          
-          if (data && data.viewport) {
-            originalPageDimensions.set(pageNum, {
-              width: data.viewport.width,
-              height: data.viewport.height,
-              scale: oldScale
-            });
-          }
-          
-          const originalDims = originalPageDimensions.get(pageNum);
-          if (originalDims) {
-            const scaledWidth = originalDims.width * scaleRatio;
-            const scaledHeight = originalDims.height * scaleRatio;
-            
-            pageInfo.container.style.width = scaledWidth + 'px';
-            pageInfo.container.style.height = scaledHeight + 'px';
-          }
-          
-          if (data) {
-            pageData.delete(pageNum);
-          }
-          
-          pageInfo.container.innerHTML = '';
-          pageInfo.container.classList.add('loading');
-          
-          const spinner = document.createElement('div');
-          spinner.className = 'loading-spinner';
-          const spinnerIcon = document.createElement('div');
-          spinnerIcon.className = 'spinner-icon';
-          spinner.appendChild(spinnerIcon);
-          pageInfo.container.appendChild(spinner);
-          
-          const pageNumber = document.createElement('div');
-          pageNumber.className = 'page-number';
-          pageNumber.textContent = pageNum + ' / ' + totalPages;
-          pageInfo.container.appendChild(pageNumber);
-          
-          pageInfo.canvas = null;
-          pageInfo.pdf = null;
-          pageInfo.page = null;
-          pageInfo.rendered = false;
-          
-          needsReload.add(pageNum);
-          pageZoomScales.delete(pageNum);
-        }
-        
-        if (pagesToCleanup.length > 0) {
-          window.parent.postMessage({ 
-            type: 'pagesDeleted', 
-            pages: pagesToCleanup 
-          }, '*');
-          
-          updateDeletedPagesContainerSizes(newScale);
-        }
-        
-        console.log('Zoom cleanup: Re-rendered ' + pagesToRerender.size + ' visible+neighbors, cleaned up ' + pagesToCleanup.length + ' distant pages');
+  if (visiblePages.length === 0) {
+    console.log('No visible pages during zoom, waiting for visibility...');
+    return;
+  }
+  
+  const pagesToRerender = new Set();
+  const pagesToReload = new Set();
+  
+  for (const visiblePage of visiblePages) {
+    // Check if page has data to rerender, or needs fresh load
+    if (pageData.has(visiblePage)) {
+      pagesToRerender.add(visiblePage);
+    } else {
+      pagesToReload.add(visiblePage);
+    }
+    
+    // Add neighbors that have data
+    if (visiblePage - 1 >= 1 && pageData.has(visiblePage - 1)) {
+      pagesToRerender.add(visiblePage - 1);
+    }
+    if (visiblePage + 1 <= totalPages && pageData.has(visiblePage + 1)) {
+      pagesToRerender.add(visiblePage + 1);
+    }
+  }
+  
+  const pagesToCleanup = [];
+  
+  for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+    const pageInfo = pageElements.get(pageNum);
+    if (!pageInfo || !pageInfo.rendered) continue;
+    
+    const lastScale = pageZoomScales.get(pageNum);
+    const needsRerenderCheck = lastScale !== undefined && Math.abs(lastScale - newScale) > 0.01;
+    
+    if (!needsRerenderCheck) continue;
+    
+    if (!pagesToRerender.has(pageNum) && !pagesToReload.has(pageNum)) {
+      pagesToCleanup.push(pageNum);
+    }
+  }
+  
+  // Rerender pages with existing data
+  for (const pageNum of pagesToRerender) {
+    rerenderPageForZoom(pageNum, newScale);
+  }
+  
+  const baseScale = isMobile ? 1.2 : 1.5;
+  const finalScale = newScale * baseScale;
+  
+  // Cleanup distant pages
+  for (const pageNum of pagesToCleanup) {
+    const pageInfo = pageElements.get(pageNum);
+    const data = pageData.get(pageNum);
+    
+    if (!pageInfo) continue;
+    
+    if (pageInfo.dimensions) {
+      const pageDim = pageInfo.dimensions;
+      
+      let widthPt = pageDim.width;
+      let heightPt = pageDim.height;
+      
+      if (pageDim.unit === 'mm') {
+        widthPt = pageDim.width * 2.83465;
+        heightPt = pageDim.height * 2.83465;
+      } else if (pageDim.unit === 'in') {
+        widthPt = pageDim.width * 72;
+        heightPt = pageDim.height * 72;
       }
       
-      // Helper function to determine current page from visible pages
+      let displayWidth, displayHeight;
+      if (currentRotation === 90 || currentRotation === 270) {
+        displayWidth = heightPt * finalScale;
+        displayHeight = widthPt * finalScale;
+      } else {
+        displayWidth = widthPt * finalScale;
+        displayHeight = heightPt * finalScale;
+      }
+      
+      pageInfo.container.style.width = displayWidth + 'px';
+      pageInfo.container.style.height = displayHeight + 'px';
+    }
+    
+    if (data) {
+      pageData.delete(pageNum);
+    }
+    
+    pageInfo.container.innerHTML = '';
+    pageInfo.container.classList.add('loading');
+    
+    const spinner = document.createElement('div');
+    spinner.className = 'loading-spinner';
+    const spinnerIcon = document.createElement('div');
+    spinnerIcon.className = 'spinner-icon';
+    spinner.appendChild(spinnerIcon);
+    pageInfo.container.appendChild(spinner);
+    
+    const pageNumber = document.createElement('div');
+    pageNumber.className = 'page-number';
+    pageNumber.textContent = pageNum + ' / ' + totalPages;
+    pageInfo.container.appendChild(pageNumber);
+    
+    pageInfo.canvas = null;
+    pageInfo.pdf = null;
+    pageInfo.page = null;
+    pageInfo.rendered = false;
+    
+    needsReload.add(pageNum);
+    pageZoomScales.delete(pageNum);
+  }
+  
+  // Handle visible pages that need reload (not in pageData)
+  for (const pageNum of pagesToReload) {
+    const pageInfo = pageElements.get(pageNum);
+    if (!pageInfo) continue;
+    
+    // Resize container to correct zoom level
+    if (pageInfo.dimensions) {
+      const pageDim = pageInfo.dimensions;
+      
+      let widthPt = pageDim.width;
+      let heightPt = pageDim.height;
+      
+      if (pageDim.unit === 'mm') {
+        widthPt = pageDim.width * 2.83465;
+        heightPt = pageDim.height * 2.83465;
+      } else if (pageDim.unit === 'in') {
+        widthPt = pageDim.width * 72;
+        heightPt = pageDim.height * 72;
+      }
+      
+      let displayWidth, displayHeight;
+      if (currentRotation === 90 || currentRotation === 270) {
+        displayWidth = heightPt * finalScale;
+        displayHeight = widthPt * finalScale;
+      } else {
+        displayWidth = widthPt * finalScale;
+        displayHeight = heightPt * finalScale;
+      }
+      
+      pageInfo.container.style.width = displayWidth + 'px';
+      pageInfo.container.style.height = displayHeight + 'px';
+    }
+    
+    // CRITICAL: Mark that this page is already sized for newScale
+    pageZoomScales.set(pageNum, newScale);
+    
+    // Request immediate reload
+    console.log('Requesting reload for visible unloaded page:', pageNum, 'at scale', newScale);
+    window.parent.postMessage({ 
+      type: 'requestPage', 
+      page: pageNum 
+    }, '*');
+  }
+  
+  if (pagesToCleanup.length > 0) {
+    window.parent.postMessage({ 
+      type: 'pagesDeleted', 
+      pages: pagesToCleanup 
+    }, '*');
+  }
+  
+  console.log('Zoom cleanup: Re-rendered ' + pagesToRerender.size + ', reloaded ' + pagesToReload.size + ', cleaned up ' + pagesToCleanup.length);
+}
+      
       function determineCurrentPageFromVisible(visiblePages) {
         if (visiblePages.length === 0) return currentPage;
         
         const containerRect = container.getBoundingClientRect();
         const containerTop = containerRect.top;
         
-        // Sort pages by number
         const sortedPages = visiblePages.sort((a, b) => a - b);
         
-        // Find first page that meets visibility criteria
         for (const pageNum of sortedPages) {
           const pageContainer = document.getElementById('page-' + pageNum);
           if (!pageContainer) continue;
@@ -1427,22 +1399,18 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           const pageBottom = pageRect.bottom;
           const pageHeight = pageRect.height;
           
-          // Check if page starts above viewport
           if (pageTop < containerTop) {
             const visibleHeight = pageBottom - containerTop;
             const visiblePercentage = (visibleHeight / pageHeight) * 100;
             
-            // If less than 10% visible, skip to next
             if (visiblePercentage < 10) {
               continue;
             }
           }
           
-          // This is the uppermost visible page with enough visibility
           return pageNum;
         }
         
-        // Fallback to first visible page
         return sortedPages[0];
       }
       
@@ -1455,74 +1423,65 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         scrollSpeedIndicator = document.getElementById('scroll-speed-indicator');
         zoomIndicator = document.getElementById('zoom-indicator');
         
-        // Fixed IntersectionObserver implementation
         visiblePagesObserver = new IntersectionObserver((entries) => {
-          // Track if we made any changes
-          let hasChanges = false;
-          
-          entries.forEach(entry => {
-            const pageNum = parseInt(entry.target.id.split('-')[1]);
-            
-            if (entry.isIntersecting && entry.intersectionRatio >= 0.05) {
-              // Page became visible
-              if (!currentVisiblePages.has(pageNum)) {
-                currentVisiblePages.add(pageNum);
-                hasChanges = true;
-                
-                // Handle pages that need reloading after being cleaned up
-                if (needsReload.has(pageNum)) {
-                  needsReload.delete(pageNum);
-                  window.parent.postMessage({ 
-                    type: 'requestPage', 
-                    page: pageNum 
-                  }, '*');
-                }
-              }
-            } else {
-              // Page became invisible
-              if (currentVisiblePages.has(pageNum)) {
-                currentVisiblePages.delete(pageNum);
-                hasChanges = true;
-              }
-            }
-          });
-          
-          // Only process if visibility actually changed
-          if (hasChanges && currentVisiblePages.size > 0) {
-            // Convert Set to Array for processing
-            const visiblePagesArray = Array.from(currentVisiblePages);
-            
-            // Determine current page using the same logic
-            const newCurrentPage = determineCurrentPageFromVisible(visiblePagesArray);
-            
-            if (newCurrentPage !== currentPage) {
-              currentPage = newCurrentPage;
-              pageIndicatorCurrent.textContent = currentPage;
-              
-              window.parent.postMessage({ 
-                type: 'pageInView', 
-                page: currentPage 
-              }, '*');
-            }
-            
-            // Notify about all visible pages for prefetching
-            window.parent.postMessage({
-              type: 'visiblePagesChanged',
-              pages: visiblePagesArray
-            }, '*');
-            
-            // Queue rerenders for visible pages if needed
-            visiblePagesArray.forEach(pageNum => {
-              if (needsRerender(pageNum)) {
-                addToRerenderQueue([pageNum], 'visible');
-              }
-            });
-          }
-        }, {
-          root: container,
-          threshold: [0.05, 0.1, 0.3, 0.5],
-          rootMargin: '200px 0px 200px 0px'
-        });
+  let hasChanges = false;
+  
+  entries.forEach(entry => {
+    const pageNum = parseInt(entry.target.id.split('-')[1]);
+    
+    if (entry.isIntersecting && entry.intersectionRatio >= 0.05) {
+      if (!currentVisiblePages.has(pageNum)) {
+        currentVisiblePages.add(pageNum);
+        hasChanges = true;
+      }
+      
+      // CRITICAL FIX: Check if this visible page needs reload
+      if (needsReload.has(pageNum)) {
+        needsReload.delete(pageNum);
+        window.parent.postMessage({ 
+          type: 'requestPage', 
+          page: pageNum 
+        }, '*');
+      }
+    } else {
+      if (currentVisiblePages.has(pageNum)) {
+        currentVisiblePages.delete(pageNum);
+        hasChanges = true;
+      }
+    }
+  });
+  
+  if (hasChanges && currentVisiblePages.size > 0) {
+    const visiblePagesArray = Array.from(currentVisiblePages);
+    
+    const newCurrentPage = determineCurrentPageFromVisible(visiblePagesArray);
+    
+    if (newCurrentPage !== currentPage) {
+      currentPage = newCurrentPage;
+      pageIndicatorCurrent.textContent = currentPage;
+      
+      window.parent.postMessage({ 
+        type: 'pageInView', 
+        page: currentPage 
+      }, '*');
+    }
+    
+    window.parent.postMessage({
+      type: 'visiblePagesChanged',
+      pages: visiblePagesArray
+    }, '*');
+    
+    visiblePagesArray.forEach(pageNum => {
+      if (needsRerender(pageNum)) {
+        addToRerenderQueue([pageNum], 'visible');
+      }
+    });
+  }
+}, {
+  root: container,
+  threshold: [0.05, 0.1, 0.3, 0.5],
+  rootMargin: '200px 0px 200px 0px'
+});
         
         const baseScale = isMobile ? 1.2 : 1.5;
         
@@ -1589,7 +1548,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         window.parent.postMessage({ type: 'viewerReady' }, '*');
       }
 
-      // Simplified scroll handler - relies on IntersectionObserver for page detection
       function setupScrollListener() {
         pageIndicatorTotal.textContent = 'of ' + totalPages;
         
@@ -1607,7 +1565,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         container.addEventListener('scroll', () => {
           const now = Date.now();
           
-          // Use currentPage from IntersectionObserver
           const direction = currentPage > scrollState.lastPageNumber ? 'down' : 
                            currentPage < scrollState.lastPageNumber ? 'up' : 
                            scrollState.lastDirection;
@@ -1691,14 +1648,637 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         }, { passive: true });
       }
       
-      // ... rest of the functions (renderPage, rerenderPageForZoom, rotatePage, setZoom, etc.)
-      // Keep all other functions as they were, they're not affected by these changes
+      async function renderPage(pageNum, pdfData) {
+  const pageInfo = pageElements.get(pageNum);
+  if (!pageInfo) {
+    console.error('No pageInfo for page ' + pageNum);
+    return;
+  }
+  
+  // CRITICAL FIX: Prevent duplicate renders
+  if (loadingPages.has(pageNum)) {
+    console.log('Page ' + pageNum + ' is already being rendered, skipping duplicate');
+    return;
+  }
+  
+  const lastScale = pageZoomScales.get(pageNum);
+  const isFirstRender = !pageInfo.rendered;
+  const needsRerender = lastScale !== undefined && Math.abs(lastScale - scale) > 0.01;
+  
+  if (pageInfo.rendered && !needsRerender) {
+    return;
+  }
+  
+  // Mark as loading to prevent duplicates
+  loadingPages.add(pageNum);
+  
+  try {
+    if (!pdfData) {
+      console.error('Page ' + pageNum + ': No PDF data received');
+      loadingPages.delete(pageNum);
+      return;
+    }
+    
+    const binary = atob(pdfData);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    
+    const loadingTask = pdfjsLib.getDocument({ 
+      data: bytes,
+      useSystemFonts: true,
+      standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/standard_fonts/',
+    });
+    
+    const pdf = await loadingTask.promise;
+    const page = await pdf.getPage(1);
+    
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { 
+      alpha: false,
+      desynchronized: true,
+      willReadFrequently: false
+    });
+    
+    const baseScale = isMobile ? 1.2 : 1.5;
+    const finalScale = scale * baseScale;
+    
+    const viewport = page.getViewport({ scale: finalScale, rotation: currentRotation });
+    
+    canvas.width = viewport.width * pixelRatio;
+    canvas.height = viewport.height * pixelRatio;
+    canvas.style.width = viewport.width + 'px';
+    canvas.style.height = viewport.height + 'px';
+    
+    ctx.scale(pixelRatio, pixelRatio);
+    
+    const renderTask = page.render({
+      canvasContext: ctx,
+      viewport: viewport,
+      background: 'rgba(255, 255, 255, 1)',
+      intent: 'display',
+    });
+    
+    try {
+      await renderTask.promise;
+    } catch (error) {
+      if (error.name === 'RenderingCancelledException') {
+        loadingPages.delete(pageNum);
+        return;
+      }
+      throw error;
+    }
+    
+    requestAnimationFrame(() => {
+      pageInfo.container.innerHTML = '';
+      pageInfo.container.appendChild(canvas);
       
-''';
+      const pageNumber = document.createElement('div');
+      pageNumber.className = 'page-number';
+      pageNumber.textContent = pageNum + ' / ' + totalPages;
+      pageInfo.container.appendChild(pageNumber);
+      
+      pageInfo.container.classList.remove('loading');
+      pageInfo.container.style.width = viewport.width + 'px';
+      pageInfo.container.style.height = viewport.height + 'px';
+    });
+    
+    pageInfo.canvas = canvas;
+    pageInfo.pdf = pdf;
+    pageInfo.page = page;
+    pageInfo.rendered = true;
+    
+    pageData.set(pageNum, { 
+      pdf, 
+      page, 
+      canvas, 
+      viewport,
+      renderTask: null 
+    });
+    
+    pageZoomScales.set(pageNum, scale);
+    
+    loadingPages.delete(pageNum);
+    
+  } catch (error) {
+    console.error('Error rendering page ' + pageNum + ':', error);
+    
+    const spinner = pageInfo.container.querySelector('.loading-spinner');
+    if (spinner) {
+      spinner.textContent = 'Error loading page';
+    }
+    
+    loadingPages.delete(pageNum);
+  }
+}
+      
+      async function rerenderPageForZoom(pageNum, targetScale) {
+        const data = pageData.get(pageNum);
+        const pageInfo = pageElements.get(pageNum);
+        if (!data || !pageInfo) return;
+        
+        const { page } = data;
+        
+        if (data.renderTask) {
+          try {
+            await data.renderTask.cancel();
+          } catch (e) {}
+        }
+        
+        const baseScale = isMobile ? 1.2 : 1.5;
+        const finalScale = targetScale * baseScale;
+        
+        const viewport = page.getViewport({ scale: finalScale, rotation: currentRotation });
+        
+        const oldCanvas = pageInfo.canvas;
+        const oldScale = pageZoomScales.get(pageNum);
+        
+        if (oldCanvas && oldScale) {
+          const scaleRatio = targetScale / oldScale;
+          oldCanvas.style.transform = 'scale(' + scaleRatio + ')';
+          oldCanvas.style.transformOrigin = 'top left';
+          oldCanvas.style.imageRendering = 'auto';
+        }
+        
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { 
+          alpha: false,
+          desynchronized: true,
+          willReadFrequently: false
+        });
+        
+        canvas.width = viewport.width * pixelRatio;
+        canvas.height = viewport.height * pixelRatio;
+        canvas.style.width = viewport.width + 'px';
+        canvas.style.height = viewport.height + 'px';
+        
+        ctx.scale(pixelRatio, pixelRatio);
+        
+        const renderTask = page.render({
+          canvasContext: ctx,
+          viewport: viewport,
+          background: 'rgba(255, 255, 255, 1)',
+          intent: 'display',
+        });
+        
+        data.renderTask = renderTask;
+        
+        try {
+          await renderTask.promise;
+          
+          requestAnimationFrame(() => {
+            const pageNumberDiv = pageInfo.container.querySelector('.page-number');
+            
+            pageInfo.container.style.width = viewport.width + 'px';
+            pageInfo.container.style.height = viewport.height + 'px';
+            
+            pageInfo.container.appendChild(canvas);
+            
+            if (oldCanvas && oldCanvas !== canvas) {
+              oldCanvas.remove();
+            }
+            
+            if (pageNumberDiv) {
+              pageInfo.container.appendChild(pageNumberDiv);
+            }
+            
+            pageInfo.canvas = canvas;
+            data.canvas = canvas;
+            data.viewport = viewport;
+          });
+          
+          pageZoomScales.set(pageNum, targetScale);
+          
+        } catch (error) {
+          if (error.name !== 'RenderingCancelledException') {
+            console.error('Render error:', error);
+          }
+        } finally {
+          data.renderTask = null;
+        }
+      }
+      
+      async function rotatePage(rotation) {
+        currentRotation = rotation;
+        
+        pageZoomScales.clear();
+        
+        const baseScale = isMobile ? 1.2 : 1.5;
+        const finalScale = scale * baseScale;
+        
+        for (let i = 1; i <= totalPages; i++) {
+          const pageInfo = pageElements.get(i);
+          if (pageInfo && pageInfo.dimensions) {
+            const pageDim = pageInfo.dimensions;
+            
+            let widthPt = pageDim.width;
+            let heightPt = pageDim.height;
+            
+            if (pageDim.unit === 'mm') {
+              widthPt = pageDim.width * 2.83465;
+              heightPt = pageDim.height * 2.83465;
+            } else if (pageDim.unit === 'in') {
+              widthPt = pageDim.width * 72;
+              heightPt = pageDim.height * 72;
+            }
+            
+            let displayWidth, displayHeight;
+            if (rotation === 90 || rotation === 270) {
+              displayWidth = heightPt * finalScale;
+              displayHeight = widthPt * finalScale;
+            } else {
+              displayWidth = widthPt * finalScale;
+              displayHeight = heightPt * finalScale;
+            }
+            
+            pageInfo.container.style.width = displayWidth + 'px';
+            pageInfo.container.style.height = displayHeight + 'px';
+          }
+        }
+        
+        const pagesToRerender = [];
+        for (const [pageNum, data] of pageData) {
+          if (data.page) {
+            pagesToRerender.push(pageNum);
+          }
+        }
+        
+        for (const pageNum of pagesToRerender) {
+          await rerenderPageForZoom(pageNum, scale);
+        }
+      }
+      
+      async function setZoom(newScale, animate = false) {
+        const effectiveMaxZoom = isMobile ? maxZoomMobile : maxZoomDesktop;
+        newScale = Math.max(0.1, Math.min(effectiveMaxZoom, newScale));
+        
+        if (Math.abs(newScale - scale) < 0.01) return;
+        
+        if (activeZoomAnimation) {
+          cancelAnimationFrame(activeZoomAnimation);
+          activeZoomAnimation = null;
+        }
+        
+        isZooming = true;
+        zoomIndicator.classList.add('visible');
+        window.parent.postMessage({ type: 'zoomStateChanged', isZooming: true }, '*');
+        
+        const oldScale = scale;
+        
+        const currentPageEl = document.getElementById('page-' + currentPage);
+        let scrollAnchor = null;
+        
+        if (currentPageEl) {
+          const containerRect = container.getBoundingClientRect();
+          const pageRect = currentPageEl.getBoundingClientRect();
+          const relativeTop = pageRect.top - containerRect.top;
+          const relativeCenter = relativeTop + (pageRect.height / 2);
+          scrollAnchor = {
+            pageTop: relativeTop,
+            scrollTop: container.scrollTop,
+            centerOffset: relativeCenter
+          };
+        }
+        
+        if (animate) {
+          await animateZoomSmooth(oldScale, newScale, scrollAnchor, currentPageEl);
+        } else {
+          scale = newScale;
+          applyZoomToAllPages(scale);
+          
+          if (scrollAnchor && currentPageEl) {
+            const scaleRatio = scale / oldScale;
+            const newScrollTop = scrollAnchor.scrollTop * scaleRatio;
+            container.scrollTop = newScrollTop;
+          }
+          
+          window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
+          
+          debouncedZoomCleanup(Array.from(currentVisiblePages), oldScale, newScale);
+          
+          isZooming = false;
+          zoomIndicator.classList.remove('visible');
+          window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
+        }
+      }
+      
+     function debouncedZoomCleanup(visiblePages, oldScale, newScale) {
+  clearTimeout(zoomDebounceTimer);
+  
+  lastVisiblePagesSnapshot = [...visiblePages];
+  
+  zoomDebounceTimer = setTimeout(() => {
+    // CRITICAL FIX: Get CURRENT visible pages, not stale snapshot
+    const freshVisiblePages = Array.from(currentVisiblePages);
+    
+    if (freshVisiblePages.length === 0) {
+      console.log('No visible pages after debounce, using snapshot');
+      cleanupAndRerenderAfterZoom(lastVisiblePagesSnapshot, oldScale, newScale);
+    } else {
+      console.log('Using fresh visible pages:', freshVisiblePages);
+      cleanupAndRerenderAfterZoom(freshVisiblePages, oldScale, newScale);
+    }
+  }, zoomDebounceMs);
+}
+      
+      async function animateZoomSmooth(startScale, endScale, scrollAnchor, currentPageEl) {
+        const duration = 200;
+        const startTime = performance.now();
+        
+        return new Promise((resolve) => {
+          function animate(currentTime) {
+            const elapsed = currentTime - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+            
+            const easeProgress = 1 - Math.pow(1 - progress, 3);
+            
+            scale = startScale + (endScale - startScale) * easeProgress;
+            
+            applyZoomToAllPages(scale);
+            
+            if (scrollAnchor && currentPageEl) {
+              const scaleRatio = scale / startScale;
+              const newScrollTop = scrollAnchor.scrollTop * scaleRatio;
+              container.scrollTop = newScrollTop;
+            }
+            
+            window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
+            
+            if (progress < 1) {
+              activeZoomAnimation = requestAnimationFrame(animate);
+            } else {
+              activeZoomAnimation = null;
+              scale = endScale;
+              
+              isZooming = false;
+              zoomIndicator.classList.remove('visible');
+              window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
+              
+              setTimeout(() => {
+                debouncedZoomCleanup(Array.from(currentVisiblePages), startScale, endScale);
+                resolve();
+              }, 50);
+            }
+          }
+          
+          activeZoomAnimation = requestAnimationFrame(animate);
+        });
+      }
+      
+      function applyZoomToAllPages(targetScale) {
+        const baseScale = isMobile ? 1.2 : 1.5;
+        const finalScale = targetScale * baseScale;
+        
+        for (let i = 1; i <= totalPages; i++) {
+          const pageInfo = pageElements.get(i);
+          if (pageInfo && pageInfo.dimensions) {
+            const pageDim = pageInfo.dimensions;
+            
+            let widthPt = pageDim.width;
+            let heightPt = pageDim.height;
+            
+            if (pageDim.unit === 'mm') {
+              widthPt = pageDim.width * 2.83465;
+              heightPt = pageDim.height * 2.83465;
+            } else if (pageDim.unit === 'in') {
+              widthPt = pageDim.width * 72;
+              heightPt = pageDim.height * 72;
+            }
+            
+            let displayWidth, displayHeight;
+            if (currentRotation === 90 || currentRotation === 270) {
+              displayWidth = heightPt * finalScale;
+              displayHeight = widthPt * finalScale;
+            } else {
+              displayWidth = widthPt * finalScale;
+              displayHeight = heightPt * finalScale;
+            }
+            
+            pageInfo.container.style.width = displayWidth + 'px';
+            pageInfo.container.style.height = displayHeight + 'px';
+          }
+        }
+      }
 
-    // Continue with renderPage, setupZoomControls, etc. - the rest remains unchanged
-    // I've only shown the corrected init() and setupScrollListener() functions here
-    // since those are the ones that needed fixing
+      function scrollToPage(pageNum) {
+        const pageContainer = document.getElementById('page-' + pageNum);
+        if (pageContainer) {
+          const pageAbsoluteTop = pageContainer.offsetTop;
+          
+          container.scrollTo({
+            top: pageAbsoluteTop,
+            behavior: 'auto'
+          });
+          
+          currentPage = pageNum;
+          pageIndicatorCurrent.textContent = currentPage;
+          window.parent.postMessage({ type: 'pageInView', page: pageNum }, '*');
+        }
+      }
+      
+      function setupKeyboardControls() {
+        document.addEventListener('keydown', async (e) => {
+          switch(e.key) {
+            case 'ArrowDown':
+            case 'PageDown':
+              e.preventDefault();
+              container.scrollBy({
+                top: container.clientHeight * 0.9,
+                behavior: 'smooth'
+              });
+              break;
+            case 'ArrowUp':
+            case 'PageUp':
+              e.preventDefault();
+              container.scrollBy({
+                top: -container.clientHeight * 0.9,
+                behavior: 'smooth'
+              });
+              break;
+            case 'ArrowRight':
+              e.preventDefault();
+              if (currentPage < totalPages) {
+                scrollToPage(currentPage + 1);
+              }
+              break;
+            case 'ArrowLeft':
+              e.preventDefault();
+              if (currentPage > 1) {
+                scrollToPage(currentPage - 1);
+              }
+              break;
+            case 'Home':
+              e.preventDefault();
+              scrollToPage(1);
+              break;
+            case 'End':
+              e.preventDefault();
+              scrollToPage(totalPages);
+              break;
+            case '+':
+            case '=':
+              if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                const newScale = Math.min(maxZoom, scale + 0.2);
+                await setZoom(newScale, true);
+              }
+              break;
+            case '-':
+            case '_':
+              if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                const newScale = Math.max(0.1, scale - 0.2);
+                await setZoom(newScale, true);
+              }
+              break;
+            case '0':
+              if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                await setZoom(1.0, true);
+              }
+              break;
+          }
+        });
+      }
+      
+      function setupZoomControls() {
+        let pinchStartDistance = 0;
+        let pinchStartScale = 1.0;
+        let isPinching = false;
+        let pinchStarted = false;
+        const pinchDeadZone = 15;
+        
+        container.addEventListener('wheel', async (e) => {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            
+            const delta = -Math.sign(e.deltaY);
+            const zoomStep = 0.1;
+            const newScale = Math.max(0.1, Math.min(maxZoom, scale + delta * zoomStep));
+            await setZoom(newScale, false);
+          }
+        }, { passive: false });
+        
+        container.addEventListener('touchstart', (e) => {
+          if (e.touches.length === 2) {
+            e.preventDefault();
+            isPinching = true;
+            pinchStarted = false;
+            
+            const touch1 = e.touches[0];
+            const touch2 = e.touches[1];
+            const dx = touch2.clientX - touch1.clientX;
+            const dy = touch2.clientY - touch1.clientY;
+            pinchStartDistance = Math.sqrt(dx * dx + dy * dy);
+            pinchStartScale = scale;
+            
+            isPinchZooming = false;
+            
+            isZooming = true;
+            zoomIndicator.classList.add('visible');
+            window.parent.postMessage({ type: 'zoomStateChanged', isZooming: true }, '*');
+          }
+        }, { passive: false });
+        
+        container.addEventListener('touchmove', async (e) => {
+          if (isPinching && e.touches.length === 2) {
+            e.preventDefault();
+            
+            const touch1 = e.touches[0];
+            const touch2 = e.touches[1];
+            const dx = touch2.clientX - touch1.clientX;
+            const dy = touch2.clientY - touch1.clientY;
+            const currentDistance = Math.sqrt(dx * dx + dy * dy);
+            
+            const distanceChange = Math.abs(currentDistance - pinchStartDistance);
+            
+            if (!pinchStarted && distanceChange < pinchDeadZone) {
+              return;
+            }
+            
+            if (!pinchStarted) {
+              pinchStarted = true;
+              isPinchZooming = true;
+            }
+            
+            const distanceRatio = currentDistance / pinchStartDistance;
+            const scaleDelta = (distanceRatio - 1) * pinchZoomSensitivity;
+            const targetScale = pinchStartScale * (1 + scaleDelta);
+            const newScale = Math.max(0.1, Math.min(maxZoom, targetScale));
+            
+            pinchZoomScale = newScale / scale;
+            
+            for (const [pageNum, data] of pageData) {
+              if (data.canvas) {
+                data.canvas.classList.add('zooming');
+                data.canvas.style.transform = 'scale(' + pinchZoomScale + ')';
+              }
+            }
+            
+            applyZoomToAllPages(newScale);
+            scale = newScale;
+            
+            window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
+          }
+        }, { passive: false });
+        
+        container.addEventListener('touchend', async (e) => {
+          if (isPinching && e.touches.length < 2) {
+            isPinching = false;
+            
+            if (isPinchZooming) {
+              for (const [pageNum, data] of pageData) {
+                if (data.canvas) {
+                  data.canvas.style.transform = '';
+                  data.canvas.classList.remove('zooming');
+                }
+              }
+              
+              isPinchZooming = false;
+              pinchZoomScale = 1.0;
+              
+              const finalScale = scale;
+              const startScale = pinchStartScale;
+              
+              setTimeout(() => {
+                debouncedZoomCleanup(Array.from(currentVisiblePages), startScale, finalScale);
+                
+                isZooming = false;
+                zoomIndicator.classList.remove('visible');
+                window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
+              }, 50);
+            } else {
+              isZooming = false;
+              zoomIndicator.classList.remove('visible');
+              window.parent.postMessage({ type: 'zoomStateChanged', isZooming: false }, '*');
+            }
+          }
+        }, { passive: true });
+      }
+      
+      window.addEventListener('message', async (event) => {
+        const data = event.data;
+        
+        if (data.type === 'loadPage') {
+          await renderPage(data.pageNumber, data.pageData);
+        } else if (data.type === 'setZoom') {
+          const animate = data.animate !== undefined ? data.animate : false;
+          await setZoom(data.scale, animate);
+        } else if (data.type === 'rotatePage') {
+          const rotation = data.rotation || 0;
+          await rotatePage(rotation);
+        } else if (data.type === 'goToPage') {
+          scrollToPage(data.page);
+        }
+      });
+      
+      init();
+    })();
+  </script>
+</body>
+</html>
+''';
 
     _iframeElement.srcdoc = htmlContent;
   }
@@ -2207,7 +2787,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     _visiblePageCheckTimer?.cancel();
     _memoryStatsTimer?.cancel();
     _pageController.dispose();
-    _pageFocusNode.unfocus();
+    _pageFocusNode.dispose();
 
     if (widget.config.enablePerformanceMonitoring) {
       final metrics = _performanceMonitor.getMetrics();
@@ -2216,5 +2796,60 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     }
 
     super.dispose();
+  }
+}
+
+// Keep _PdfPerformanceMonitor class as is from original code
+class _PdfPerformanceMonitor {
+  final Map<int, DateTime> _loadStartTimes = {};
+  final Map<int, int> _loadDurations = {};
+  final List<double> _zoomLevels = [];
+  final List<int> _pageViewDurations = [];
+  DateTime? _sessionStart;
+
+  void startSession() {
+    _sessionStart = DateTime.now();
+  }
+
+  void startPageLoad(int page) {
+    _loadStartTimes[page] = DateTime.now();
+  }
+
+  void endPageLoad(int page) {
+    final start = _loadStartTimes[page];
+    if (start != null) {
+      final duration = DateTime.now().difference(start);
+      _loadDurations[page] = duration.inMilliseconds;
+      _loadStartTimes.remove(page);
+      print('Page $page loaded in ${duration.inMilliseconds}ms');
+    }
+  }
+
+  void recordZoom(double zoomLevel) {
+    _zoomLevels.add(zoomLevel);
+  }
+
+  void recordPageView(int page, Duration duration) {
+    _pageViewDurations.add(duration.inSeconds);
+  }
+
+  Map<String, dynamic> getMetrics() {
+    final avgLoadTime = _loadDurations.values.isEmpty
+        ? 0
+        : _loadDurations.values.reduce((a, b) => a + b) / _loadDurations.values.length;
+
+    final avgViewTime = _pageViewDurations.isEmpty
+        ? 0
+        : _pageViewDurations.reduce((a, b) => a + b) / _pageViewDurations.length;
+
+    return {
+      'totalPagesLoaded': _loadDurations.length,
+      'averageLoadTimeMs': avgLoadTime.round(),
+      'averageViewTimeSeconds': avgViewTime.round(),
+      'zoomLevelsUsed': _zoomLevels.length,
+      'sessionDuration': _sessionStart != null
+          ? DateTime.now().difference(_sessionStart!).inSeconds
+          : 0,
+    };
   }
 }

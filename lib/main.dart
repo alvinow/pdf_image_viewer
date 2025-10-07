@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:pdf_image_viewer/appconfig.dart';
 import 'package:pdf_image_viewer/screens/pdfviewerwebscreen.dart';
 
+
 void main() {
   runApp(const MyApp());
 }
@@ -159,7 +160,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => PdfViewerAndroidScreen(
+        builder: (context) => PdfViewerWebScreen(
           documentId: docId,
           apiBaseUrl: url,
           title: "<untitled>",

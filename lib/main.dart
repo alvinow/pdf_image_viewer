@@ -159,7 +159,7 @@ class _DocumentListScreenState extends State<DocumentListScreen> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => PdfViewerWebScreen(
+        builder: (context) => PdfViewerAndroidScreen(
           documentId: docId,
           apiBaseUrl: url,
           title: "<untitled>",

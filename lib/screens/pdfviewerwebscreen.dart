@@ -269,6 +269,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       align-items: center;
       gap: 20px;
       padding: 20px 0;
+      min-width: 100%;
     }
     .page-placeholder {
       background: white;
@@ -279,6 +280,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       position: relative;
       width: 100%;
       transition: filter 0.3s ease;
+      margin: 0 auto;
     }
     body.dark-mode .page-placeholder {
       filter: invert(0.9) hue-rotate(180deg);
@@ -399,7 +401,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
       const totalPages = ''' + totalPages.toString() + r''';
       const pageDimensions = ''' + pageDimensionsJsonString + r''';
-      const pinchZoomSensitivity = isMobile ? ''' + widget.config.pinchZoomSensitivityMobile.toString() + r''' : ''' + widget.config.pinchZoomSensitivityDesktop.toString() + r''';
       const enableTextSelection = ''' + enableTextSelection.toString() + r''';
 
       let container, virtualScroller;
@@ -410,6 +411,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
       const placeholders = [];
       const renderingPages = new Set();
+
+      // Pinch zoom variables
+      let initialPinchDistance = null;
+      let initialScale = 1.0;
 
       function calculateLayout() {
         const baseScale = isMobile ? 1.2 : 1.5;
@@ -528,8 +533,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             
             if (pageContent) {
               const canvas = pageContent.querySelector('canvas');
-              const textLayer = pageContent.querySelector('.textLayer');
-              const pageNumber = pageContent.querySelector('.page-number');
               
               if (canvas) {
                 const ctx = canvas.getContext('2d');
@@ -591,18 +594,15 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
       async function renderPage(pageNum, pdfData) {
         if (renderingPages.has(pageNum)) {
-          console.log('Page ' + pageNum + ' already rendering, skipping');
           return;
         }
 
         const placeholder = placeholders[pageNum - 1];
         if (!placeholder) {
-          console.error('Placeholder not found for page ' + pageNum);
           return;
         }
 
         if (placeholder.querySelector('.page-content')) {
-          console.log('Page ' + pageNum + ' already rendered');
           return;
         }
 
@@ -648,7 +648,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
           pageContent.appendChild(canvas);
 
-          // Render text layer for selection
           if (enableTextSelection === 'true') {
             const textLayerDiv = document.createElement('div');
             textLayerDiv.className = 'textLayer';
@@ -783,6 +782,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }, 50);
         }, { passive: true });
 
+        // Desktop zoom with Ctrl+Wheel
         container.addEventListener('wheel', (e) => {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
@@ -791,6 +791,37 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             setZoom(newScale);
           }
         }, { passive: false });
+
+        // Mobile pinch-to-zoom
+        container.addEventListener('touchstart', (e) => {
+          if (e.touches.length === 2) {
+            const touch1 = e.touches[0];
+            const touch2 = e.touches[1];
+            initialPinchDistance = Math.hypot(
+              touch2.clientX - touch1.clientX,
+              touch2.clientY - touch1.clientY
+            );
+            initialScale = scale;
+          }
+        }, { passive: true });
+
+        container.addEventListener('touchmove', (e) => {
+          if (e.touches.length === 2 && initialPinchDistance) {
+            e.preventDefault();
+            const touch1 = e.touches[0];
+            const touch2 = e.touches[1];
+            const currentDistance = Math.hypot(
+              touch2.clientX - touch1.clientX,
+              touch2.clientY - touch1.clientY
+            );
+            const scaleChange = currentDistance / initialPinchDistance;
+            setZoom(initialScale * scaleChange);
+          }
+        }, { passive: false });
+
+        container.addEventListener('touchend', () => {
+          initialPinchDistance = null;
+        }, { passive: true });
 
         window.parent.postMessage({ type: 'viewerReady' }, '*');
         updateVisiblePages();
@@ -995,15 +1026,18 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        toolbarHeight: 40,
+        backgroundColor: Colors.black26,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(_documentInfo?.title ?? widget.title),
+            /*
             if (_documentInfo != null)
               Text(
                 '${_pageCache.length} cached • ${_documentInfo!.formattedFileSize} • ${_rotationDegrees}°',
                 style: Theme.of(context).textTheme.bodySmall,
-              ),
+              ),*/
           ],
         ),
         actions: [
@@ -1012,11 +1046,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             onPressed: _toggleDarkMode,
             tooltip: 'Toggle Dark Mode',
           ),
-          IconButton(
-            icon: const Icon(Icons.rotate_left),
-            onPressed: _rotateCounterClockwise,
-            tooltip: 'Rotate Left',
-          ),
+
           IconButton(
             icon: const Icon(Icons.rotate_right),
             onPressed: _rotateClockwise,
@@ -1024,11 +1054,16 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           ),
           const VerticalDivider(),
           IconButton(
+            padding: EdgeInsets.zero,  // Remove padding
+            constraints: BoxConstraints(),
             icon: const Icon(Icons.zoom_out),
             onPressed: () => _setZoom(_zoomLevel - 0.3),
           ),
+
           Text('${(_zoomLevel * 100).toInt()}%'),
           IconButton(
+            padding: EdgeInsets.zero,  // Remove padding
+            constraints: BoxConstraints(),
             icon: const Icon(Icons.zoom_in),
             onPressed: () => _setZoom(_zoomLevel + 0.3),
           ),
@@ -1045,24 +1080,43 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       children: [
         IconButton(
           icon: const Icon(Icons.chevron_left),
+          padding: EdgeInsets.zero,  // Remove padding
+          constraints: BoxConstraints(),
           onPressed: _currentPage > 1 ? () => _goToPage(_currentPage - 1) : null,
         ),
         SizedBox(
-          width: 80,
+          width: 40,  // Reduced from 40
           child: TextField(
+
             controller: _pageController,
             focusNode: _pageFocusNode,
             textAlign: TextAlign.center,
             keyboardType: TextInputType.number,
+            style: TextStyle(fontSize: 12),
+            cursorHeight: 12,
+            decoration: InputDecoration(
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(4),
+                borderSide: BorderSide.none,
+              ),
+              filled: true,
+              fillColor: Colors.white,
+              //border: InputBorder.none,
+              contentPadding: EdgeInsets.zero,  // Remove internal padding
+              isDense: true,  // M
+              constraints: BoxConstraints(maxWidth: 40),  // ake it more compact
+            ),
             onSubmitted: (value) {
               final page = int.tryParse(value);
               if (page != null) _goToPage(page);
             },
           ),
         ),
-        Text(' / ${_documentInfo!.totalPages}'),
+        SizedBox(width: 7,),
+        Text('${_documentInfo!.totalPages}',style: TextStyle(fontSize: 12),),
         IconButton(
           icon: const Icon(Icons.chevron_right),
+
           onPressed: _currentPage < _documentInfo!.totalPages
               ? () => _goToPage(_currentPage + 1)
               : null,

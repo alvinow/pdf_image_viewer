@@ -1,42 +1,380 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
+    <!--
+      If you are serving your web app in a path other than the root, change the
+      href value below to reflect the base path you are serving from.
 
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
+      The path provided below has to start and end with a slash "/" in order for
+      it to work correctly.
 
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+      For more details:
+      * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
 
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
-  <base href="$FLUTTER_BASE_HREF">
+      This is a placeholder for base href that will be replaced by the value of
+      the `--base-href` argument provided to `flutter build`.
+    -->
+    <base href="$FLUTTER_BASE_HREF">
 
-  <meta charset="UTF-8">
-  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="pdf image viewer project">
+    <meta charset="UTF-8">
+    <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+    <meta name="description" content="pdf image viewer project">
 
-  <!-- iOS meta tags & icons -->
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="pdf_image_viewer">
-  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+    <!-- iOS meta tags & icons -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="pdf_image_viewer">
+    <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>pdf_image_viewer</title>
-  <link rel="manifest" href="manifest.json">
+    <title>pdf_image_viewer</title>
+    <link rel="manifest" href="manifest.json">
+
+    <style>
+        body {
+          margin: 0;
+          padding: 0;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          height: 100vh;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+        }
+
+        #loading-container {
+          text-align: center;
+          color: white;
+          transition: opacity 0.3s ease-out;
+        }
+
+        .spinner {
+          width: 50px;
+          height: 50px;
+          border: 4px solid rgba(255, 255, 255, 0.3);
+          border-top: 4px solid white;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+          margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+          font-size: 18px;
+          margin-bottom: 10px;
+          font-weight: 500;
+        }
+
+        .version-text {
+          font-size: 14px;
+          opacity: 0.8;
+          margin-top: 10px;
+        }
+
+        .error-container {
+          background: linear-gradient(145deg, rgba(20, 20, 35, 0.95), rgba(30, 30, 50, 0.98));
+          backdrop-filter: blur(30px);
+          -webkit-backdrop-filter: blur(30px);
+          color: #ffffff;
+          padding: 50px 40px 40px;
+          border-radius: 24px;
+          max-width: 420px;
+          box-shadow:
+            0 30px 90px rgba(0, 0, 0, 0.5),
+            0 0 0 1px rgba(255, 255, 255, 0.1),
+            inset 0 0 60px rgba(102, 126, 234, 0.1);
+          animation: slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+                     glow 3s ease-in-out infinite;
+          position: relative;
+          overflow: hidden;
+        }
+
+        .error-container::before {
+          content: '';
+          position: absolute;
+          top: -50%;
+          left: -50%;
+          width: 200%;
+          height: 200%;
+          background: radial-gradient(circle, rgba(102, 126, 234, 0.15) 0%, transparent 70%);
+          animation: rotate 20s linear infinite;
+        }
+
+        .error-container::after {
+          content: '';
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(45deg,
+            transparent 0%,
+            rgba(118, 75, 162, 0.1) 50%,
+            transparent 100%);
+          animation: shimmer 3s ease-in-out infinite;
+        }
+
+        @keyframes slideUp {
+          from {
+            opacity: 0;
+            transform: translateY(30px) scale(0.9);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+          }
+        }
+
+        @keyframes glow {
+          0%, 100% {
+            box-shadow:
+              0 30px 90px rgba(0, 0, 0, 0.5),
+              0 0 0 1px rgba(255, 255, 255, 0.1),
+              inset 0 0 60px rgba(102, 126, 234, 0.1);
+          }
+          50% {
+            box-shadow:
+              0 30px 90px rgba(0, 0, 0, 0.5),
+              0 0 0 1px rgba(102, 126, 234, 0.3),
+              inset 0 0 80px rgba(102, 126, 234, 0.2);
+          }
+        }
+
+        @keyframes rotate {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+
+        @keyframes shimmer {
+          0%, 100% { opacity: 0.3; }
+          50% { opacity: 0.6; }
+        }
+
+        .error-icon {
+          font-size: 72px;
+          margin-bottom: 24px;
+          filter: drop-shadow(0 0 20px rgba(255, 107, 107, 0.6));
+          animation: pulse 2s ease-in-out infinite;
+          position: relative;
+          z-index: 1;
+        }
+
+        @keyframes pulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.05); }
+        }
+
+        .error-title {
+          font-size: 26px;
+          font-weight: 700;
+          margin-bottom: 16px;
+          background: linear-gradient(135deg, #ffffff, #a8b8ff);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+          letter-spacing: -0.5px;
+          position: relative;
+          z-index: 1;
+        }
+
+        .error-message {
+          font-size: 16px;
+          line-height: 1.7;
+          margin-bottom: 32px;
+          color: rgba(255, 255, 255, 0.75);
+          font-weight: 400;
+          position: relative;
+          z-index: 1;
+        }
+
+        .retry-button {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+          border: none;
+          padding: 16px 0;
+          width: 100%;
+          font-size: 17px;
+          font-weight: 600;
+          border-radius: 14px;
+          cursor: pointer;
+          transition: all 0.3s ease;
+          letter-spacing: 0.3px;
+          text-transform: uppercase;
+          box-shadow: 0 8px 24px rgba(102, 126, 234, 0.4);
+          position: relative;
+          z-index: 1;
+          overflow: hidden;
+        }
+
+        .retry-button::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: -100%;
+          width: 100%;
+          height: 100%;
+          background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+          transition: left 0.5s;
+        }
+
+        .retry-button:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 12px 32px rgba(102, 126, 234, 0.6);
+        }
+
+        .retry-button:hover::before {
+          left: 100%;
+        }
+
+        .retry-button:active {
+          transform: scale(0.97);
+        }
+
+        .hidden {
+          display: none;
+        }
+
+        /* Hide body background when app loads */
+        body.app-loaded {
+          background: white;
+        }
+    </style>
 </head>
 <body>
-  <script src="flutter_bootstrap.js" async></script>
-  <script type="module" async>
-    import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs';
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.mjs";
-  </script>
+<!-- Loading Screen -->
+<div id="loading-container">
+    <div class="spinner"></div>
+    <div class="loading-text">Loading PDF Viewer...</div>
+    <div class="version-text">Checking version...</div>
+</div>
+
+<!-- 🎨 CUSTOMIZE ERROR DIALOG HERE -->
+<div id="error-container" class="error-container hidden">
+    <!-- Change icon emoji here (🌐, 🚀, ⚠️, 🔌, 💫, ⚡, 🛸, 📄) -->
+    <div class="error-icon">📄</div>
+
+    <!-- Change title text here -->
+    <div class="error-title">Unable to Load Viewer</div>
+
+    <!-- Change message text here -->
+    <div class="error-message" id="error-message">
+        We're having trouble initializing the PDF viewer. Let's try reconnecting your experience.
+    </div>
+
+    <!-- Change button text here -->
+    <button class="retry-button" onclick="retryLoad()">Reconnect</button>
+</div>
+
+<script>
+    // ⚙️ CHANGE VERSION HERE - Update this when you release new versions
+    const APP_VERSION = '1.0.0';
+    const VERSION_KEY = 'pdf_viewer_version';
+
+    // 📝 CUSTOMIZE ERROR MESSAGES HERE
+    const ERROR_MESSAGES = {
+      initialization: '🚀 Launch sequence interrupted. Your PDF viewer needs a moment to recalibrate.',
+      timeout: '⏱️ The viewer is taking longer than expected. The digital realm might be a bit crowded right now.',
+      global: '✨ A glitch in the matrix detected. Let\'s reset and try again.',
+      pdfjs: '📄 Unable to load PDF library. Please check your connection and try again.'
+    };
+
+    function showError(message) {
+      const loadingContainer = document.getElementById('loading-container');
+      const errorContainer = document.getElementById('error-container');
+
+      if (loadingContainer) loadingContainer.classList.add('hidden');
+      if (errorContainer) {
+        errorContainer.classList.remove('hidden');
+        document.getElementById('error-message').textContent = message;
+      }
+    }
+
+    function retryLoad() {
+      location.reload(true);
+    }
+
+    function checkVersion() {
+      const storedVersion = localStorage.getItem(VERSION_KEY);
+
+      if (storedVersion && storedVersion !== APP_VERSION) {
+        console.log(`Version changed from ${storedVersion} to ${APP_VERSION}. Clearing cache...`);
+
+        // Clear service worker cache
+        if ('serviceWorker' in navigator) {
+          caches.keys().then(function(names) {
+            for (let name of names) {
+              caches.delete(name);
+            }
+          });
+
+          navigator.serviceWorker.getRegistrations().then(function(registrations) {
+            for(let registration of registrations) {
+              registration.unregister();
+            }
+          });
+        }
+
+        // Clear storage
+        localStorage.clear();
+        sessionStorage.clear();
+
+        // Store new version
+        localStorage.setItem(VERSION_KEY, APP_VERSION);
+
+        // Force reload without cache
+        window.location.reload(true);
+        return false;
+      }
+
+      // Store version if not exists
+      if (!storedVersion) {
+        localStorage.setItem(VERSION_KEY, APP_VERSION);
+      }
+
+      return true;
+    }
+
+    // Check version before loading
+    if (!checkVersion()) {
+      document.querySelector('.version-text').textContent = 'New version detected, reloading...';
+    } else {
+      document.querySelector('.version-text').textContent = `Version: ${APP_VERSION}`;
+    }
+
+    // Global error handler
+    window.addEventListener('error', function(event) {
+      console.error('Global error:', event.error);
+      showError(ERROR_MESSAGES.global);
+    });
+
+    // Timeout handler - show error if loading takes too long
+    const loadingTimeout = setTimeout(function() {
+      if (!document.getElementById('loading-container').classList.contains('hidden')) {
+        showError(ERROR_MESSAGES.timeout);
+      }
+    }, 30000); // 30 second timeout
+
+    // Monitor for successful load
+    window.addEventListener('flutter-first-frame', function() {
+      clearTimeout(loadingTimeout);
+      const loadingContainer = document.getElementById('loading-container');
+      if (loadingContainer) {
+        loadingContainer.style.opacity = '0';
+        setTimeout(function() {
+          loadingContainer.style.display = 'none';
+          document.body.classList.add('app-loaded');
+        }, 300);
+      }
+    });
+</script>
+
+<!-- Load Flutter Bootstrap -->
+<script src="flutter_bootstrap.js" async></script>
+
+<!-- Load PDF.js Library -->
+
 </body>
 </html>

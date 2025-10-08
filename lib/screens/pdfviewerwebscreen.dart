@@ -16,13 +16,17 @@ class PdfViewerConfig {
   final double pinchZoomSensitivityMobile;
   final double pinchZoomSensitivityDesktop;
   final int maxCacheSize;
+  final bool enableTextSelection;
+  final bool enableDarkMode;
 
   const PdfViewerConfig({
     this.prefetchRadius = 3,
     this.enableDebugLogging = false,
     this.pinchZoomSensitivityMobile = 0.15,
     this.pinchZoomSensitivityDesktop = 0.0000001,
-    this.maxCacheSize = 20,  // Keep only 20 pages in Flutter cache
+    this.maxCacheSize = 20,
+    this.enableTextSelection = true,
+    this.enableDarkMode = false,
   });
 }
 
@@ -51,12 +55,13 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   String? _error;
   int _currentPage = 1;
   double _zoomLevel = 1.0;
+  int _rotationDegrees = 0;
+  bool _isDarkMode = false;
 
   late html.IFrameElement _iframeElement;
   final String _viewId = 'pdf-viewer-${DateTime.now().millisecondsSinceEpoch}';
   bool _viewerInitialized = false;
 
-  // Simplified caching - only in Flutter
   final Map<int, Uint8List> _pageCache = {};
   final Set<int> _loadingPages = {};
   Timer? _prefetchTimer;
@@ -75,6 +80,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     _apiService = PdfApiService(
       baseUrl: widget.apiBaseUrl ?? AppConfig.baseUrl,
     );
+    _isDarkMode = widget.config.enableDarkMode;
 
     _initializePdfViewer();
     _loadDocument();
@@ -218,6 +224,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
     final pageDimensionsJsonString = jsonEncode(pageDimensionsJson);
     final totalPages = _documentInfo!.totalPages;
+    final enableTextSelection = widget.config.enableTextSelection;
 
     final htmlContent = r'''
 <!DOCTYPE html>
@@ -241,6 +248,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     body {
       background: #525659;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      transition: background-color 0.3s ease;
+    }
+    body.dark-mode {
+      background: #1a1a1a;
     }
     #pdf-container {
       width: 100%;
@@ -267,12 +278,47 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       justify-content: center;
       position: relative;
       width: 100%;
+      transition: filter 0.3s ease;
+    }
+    body.dark-mode .page-placeholder {
+      filter: invert(0.9) hue-rotate(180deg);
+    }
+    .page-content {
+      position: relative;
+      width: 100%;
+      height: 100%;
     }
     canvas {
       display: block;
       background: white;
       width: 100%;
       height: 100%;
+    }
+    .textLayer {
+      position: absolute;
+      left: 0;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      overflow: hidden;
+      opacity: 0.2;
+      line-height: 1.0;
+    }
+    .textLayer > span {
+      color: transparent;
+      position: absolute;
+      white-space: pre;
+      cursor: text;
+      transform-origin: 0% 0%;
+    }
+    .textLayer ::selection {
+      background: rgba(0, 100, 255, 0.3);
+    }
+    .textLayer ::-moz-selection {
+      background: rgba(0, 100, 255, 0.3);
+    }
+    body.dark-mode .textLayer ::selection {
+      background: rgba(255, 200, 0, 0.3);
     }
     .page-number {
       position: absolute;
@@ -285,6 +331,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       font-size: 12px;
       z-index: 10;
       pointer-events: none;
+    }
+    body.dark-mode .page-number {
+      background: rgba(255,255,255,0.7);
+      color: black;
     }
     .loading-spinner {
       position: absolute;
@@ -350,14 +400,16 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       const totalPages = ''' + totalPages.toString() + r''';
       const pageDimensions = ''' + pageDimensionsJsonString + r''';
       const pinchZoomSensitivity = isMobile ? ''' + widget.config.pinchZoomSensitivityMobile.toString() + r''' : ''' + widget.config.pinchZoomSensitivityDesktop.toString() + r''';
+      const enableTextSelection = ''' + enableTextSelection.toString() + r''';
 
       let container, virtualScroller;
       let scale = 1.0;
       let currentPage = 1;
       let currentRotation = 0;
+      let isDarkMode = false;
 
       const placeholders = [];
-      const renderingPages = new Set(); // Track pages being rendered to prevent duplicates
+      const renderingPages = new Set();
 
       function calculateLayout() {
         const baseScale = isMobile ? 1.2 : 1.5;
@@ -471,27 +523,26 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         placeholders.forEach((placeholder, idx) => {
           const pageNum = idx + 1;
           
-          // Clean up if not visible and not currently rendering
           if (!visibleSet.has(pageNum) && !renderingPages.has(pageNum)) {
-            const canvas = placeholder.querySelector('canvas');
-            const pageNumber = placeholder.querySelector('.page-number');
+            const pageContent = placeholder.querySelector('.page-content');
             
-            if (canvas) {
-              // Clear canvas to free memory
-              const ctx = canvas.getContext('2d');
-              if (ctx) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (pageContent) {
+              const canvas = pageContent.querySelector('canvas');
+              const textLayer = pageContent.querySelector('.textLayer');
+              const pageNumber = pageContent.querySelector('.page-number');
+              
+              if (canvas) {
+                const ctx = canvas.getContext('2d');
+                if (ctx) {
+                  ctx.clearRect(0, 0, canvas.width, canvas.height);
+                }
+                canvas.width = 1;
+                canvas.height = 1;
               }
-              canvas.width = 1;
-              canvas.height = 1;
-              canvas.remove();
-            }
-            
-            if (pageNumber) {
-              pageNumber.remove();
+              
+              pageContent.remove();
             }
 
-            // Show spinner again
             let spinner = placeholder.querySelector('.loading-spinner');
             if (!spinner) {
               spinner = document.createElement('div');
@@ -518,18 +569,16 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }, '*');
         }
 
-        // Notify parent of visible pages
         window.parent.postMessage({
           type: 'visiblePagesChanged',
           pages: visiblePages
         }, '*');
 
-        // Request any missing visible pages
         for (const pageNum of visiblePages) {
           const placeholder = placeholders[pageNum - 1];
-          const hasCanvas = placeholder?.querySelector('canvas');
+          const hasContent = placeholder?.querySelector('.page-content');
           
-          if (!hasCanvas && !renderingPages.has(pageNum)) {
+          if (!hasContent && !renderingPages.has(pageNum)) {
             window.parent.postMessage({ 
               type: 'requestPage', 
               page: pageNum 
@@ -537,12 +586,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }
         }
 
-        // Clean up off-screen pages
         cleanupOffscreenPages();
       }
 
       async function renderPage(pageNum, pdfData) {
-        // Prevent duplicate renders
         if (renderingPages.has(pageNum)) {
           console.log('Page ' + pageNum + ' already rendering, skipping');
           return;
@@ -554,8 +601,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           return;
         }
 
-        // Check if already rendered
-        if (placeholder.querySelector('canvas')) {
+        if (placeholder.querySelector('.page-content')) {
           console.log('Page ' + pageNum + ' already rendered');
           return;
         }
@@ -577,6 +623,9 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           const pdf = await loadingTask.promise;
           const page = await pdf.getPage(1);
 
+          const pageContent = document.createElement('div');
+          pageContent.className = 'page-content';
+
           const canvas = document.createElement('canvas');
           const ctx = canvas.getContext('2d', { alpha: false });
 
@@ -597,27 +646,43 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             background: 'white',
           }).promise;
 
-          // Hide spinner
+          pageContent.appendChild(canvas);
+
+          // Render text layer for selection
+          if (enableTextSelection === 'true') {
+            const textLayerDiv = document.createElement('div');
+            textLayerDiv.className = 'textLayer';
+            textLayerDiv.style.width = canvas.style.width;
+            textLayerDiv.style.height = canvas.style.height;
+
+            const textContent = await page.getTextContent();
+            
+            pdfjsLib.renderTextLayer({
+              textContentSource: textContent,
+              container: textLayerDiv,
+              viewport: viewport,
+              textDivs: [],
+            });
+
+            pageContent.appendChild(textLayerDiv);
+          }
+
           const spinner = placeholder.querySelector('.loading-spinner');
           if (spinner) spinner.style.display = 'none';
 
-          // Add canvas to placeholder
-          placeholder.appendChild(canvas);
+          placeholder.appendChild(pageContent);
 
-          // Add page number
           const pageNumber = document.createElement('div');
           pageNumber.className = 'page-number';
           pageNumber.textContent = pageNum + ' / ' + totalPages;
-          placeholder.appendChild(pageNumber);
+          pageContent.appendChild(pageNumber);
 
-          // Clean up PDF.js resources
           page.cleanup();
           pdf.destroy();
 
         } catch (error) {
           console.error('Error rendering page ' + pageNum + ':', error);
           
-          // Show error in placeholder
           const errorDiv = document.createElement('div');
           errorDiv.style.cssText = 'color: #e74c3c; text-align: center; padding: 20px;';
           errorDiv.textContent = 'Error loading page ' + pageNum;
@@ -635,18 +700,12 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         const oldScrollRatio = container.scrollTop / container.scrollHeight;
         scale = newScale;
 
-        // Recalculate layout
         calculateLayout();
 
-        // Clear all rendered canvases - they need re-rendering at new scale
         placeholders.forEach(placeholder => {
-          const canvas = placeholder.querySelector('canvas');
-          const pageNumber = placeholder.querySelector('.page-number');
-          
-          if (canvas) canvas.remove();
-          if (pageNumber) pageNumber.remove();
+          const pageContent = placeholder.querySelector('.page-content');
+          if (pageContent) pageContent.remove();
 
-          // Show spinner
           let spinner = placeholder.querySelector('.loading-spinner');
           if (!spinner) {
             spinner = document.createElement('div');
@@ -660,12 +719,54 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }
         });
 
-        // Restore scroll position
         requestAnimationFrame(() => {
           container.scrollTop = container.scrollHeight * oldScrollRatio;
           window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
           updateVisiblePages();
         });
+      }
+
+      function setRotation(degrees) {
+        degrees = degrees % 360;
+        if (degrees < 0) degrees += 360;
+        
+        if (currentRotation === degrees) return;
+
+        const oldScrollRatio = container.scrollTop / container.scrollHeight;
+        currentRotation = degrees;
+
+        calculateLayout();
+
+        placeholders.forEach(placeholder => {
+          const pageContent = placeholder.querySelector('.page-content');
+          if (pageContent) pageContent.remove();
+
+          let spinner = placeholder.querySelector('.loading-spinner');
+          if (!spinner) {
+            spinner = document.createElement('div');
+            spinner.className = 'loading-spinner';
+            const spinnerIcon = document.createElement('div');
+            spinnerIcon.className = 'spinner-icon';
+            spinner.appendChild(spinnerIcon);
+            placeholder.appendChild(spinner);
+          } else {
+            spinner.style.display = 'block';
+          }
+        });
+
+        requestAnimationFrame(() => {
+          container.scrollTop = container.scrollHeight * oldScrollRatio;
+          updateVisiblePages();
+        });
+      }
+
+      function setDarkMode(enabled) {
+        isDarkMode = enabled;
+        if (enabled) {
+          document.body.classList.add('dark-mode');
+        } else {
+          document.body.classList.remove('dark-mode');
+        }
       }
 
       function init() {
@@ -674,7 +775,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
         createPlaceholders();
 
-        // Scroll handler with debounce
         let scrollTimeout;
         container.addEventListener('scroll', () => {
           clearTimeout(scrollTimeout);
@@ -683,7 +783,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }, 50);
         }, { passive: true });
 
-        // Zoom controls
         container.addEventListener('wheel', (e) => {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
@@ -709,6 +808,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           if (placeholder) {
             placeholder.scrollIntoView({ behavior: 'smooth', block: 'start' });
           }
+        } else if (data.type === 'setRotation') {
+          setRotation(data.degrees);
+        } else if (data.type === 'setDarkMode') {
+          setDarkMode(data.enabled);
         }
       });
 
@@ -747,13 +850,11 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   }
 
   Future<void> _loadAndSendPage(int pageNumber) async {
-    // If already cached, send immediately
     if (_pageCache.containsKey(pageNumber)) {
       _sendPageToViewer(pageNumber, _pageCache[pageNumber]!);
       return;
     }
 
-    // If already loading, skip
     if (_loadingPages.contains(pageNumber)) {
       return;
     }
@@ -769,7 +870,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       _pageCache[pageNumber] = pageData;
       _loadingPages.remove(pageNumber);
 
-      // Manage cache size
       _cleanupCache();
 
       _sendPageToViewer(pageNumber, pageData);
@@ -851,6 +951,46 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     }
   }
 
+  void _rotateClockwise() {
+    setState(() {
+      _rotationDegrees = (_rotationDegrees + 90) % 360;
+    });
+
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'setRotation',
+        'degrees': _rotationDegrees,
+      }, '*');
+    }
+  }
+
+  void _rotateCounterClockwise() {
+    setState(() {
+      _rotationDegrees = (_rotationDegrees - 90) % 360;
+      if (_rotationDegrees < 0) _rotationDegrees += 360;
+    });
+
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'setRotation',
+        'degrees': _rotationDegrees,
+      }, '*');
+    }
+  }
+
+  void _toggleDarkMode() {
+    setState(() {
+      _isDarkMode = !_isDarkMode;
+    });
+
+    if (_viewerInitialized) {
+      _iframeElement.contentWindow?.postMessage({
+        'type': 'setDarkMode',
+        'enabled': _isDarkMode,
+      }, '*');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -861,12 +1001,28 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             Text(_documentInfo?.title ?? widget.title),
             if (_documentInfo != null)
               Text(
-                '${_pageCache.length} pages cached • ${_documentInfo!.formattedFileSize}',
+                '${_pageCache.length} cached • ${_documentInfo!.formattedFileSize} • ${_rotationDegrees}°',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
           ],
         ),
         actions: [
+          IconButton(
+            icon: Icon(_isDarkMode ? Icons.light_mode : Icons.dark_mode),
+            onPressed: _toggleDarkMode,
+            tooltip: 'Toggle Dark Mode',
+          ),
+          IconButton(
+            icon: const Icon(Icons.rotate_left),
+            onPressed: _rotateCounterClockwise,
+            tooltip: 'Rotate Left',
+          ),
+          IconButton(
+            icon: const Icon(Icons.rotate_right),
+            onPressed: _rotateClockwise,
+            tooltip: 'Rotate Right',
+          ),
+          const VerticalDivider(),
           IconButton(
             icon: const Icon(Icons.zoom_out),
             onPressed: () => _setZoom(_zoomLevel - 0.3),
@@ -876,6 +1032,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             icon: const Icon(Icons.zoom_in),
             onPressed: () => _setZoom(_zoomLevel + 0.3),
           ),
+          const VerticalDivider(),
           if (_documentInfo != null) _buildPageNav(),
         ],
       ),

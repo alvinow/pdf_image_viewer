@@ -22,8 +22,8 @@ class PdfViewerConfig {
   const PdfViewerConfig({
     this.prefetchRadius = 3,
     this.enableDebugLogging = false,
-    this.pinchZoomSensitivityMobile = 0.15,
-    this.pinchZoomSensitivityDesktop = 0.0000001,
+    this.pinchZoomSensitivityMobile = 0.005,    // ✅ Fixed: 0.005 untuk smooth mobile zoom
+    this.pinchZoomSensitivityDesktop = 0.1,     // ✅ Fixed: 0.1 untuk desktop scroll zoom
     this.maxCacheSize = 20,
     this.enableTextSelection = true,
     this.enableDarkMode = false,
@@ -72,6 +72,14 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
   bool get _isMobile {
     final data = MediaQuery.of(context);
     return data.size.shortestSide < 600;
+  }
+
+  bool get _isLandscape {
+    return MediaQuery.of(context).orientation == Orientation.landscape;
+  }
+
+  bool get _shouldUseVerticalAppBar {
+    return _isMobile && _isLandscape;
   }
 
   @override
@@ -225,6 +233,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     final pageDimensionsJsonString = jsonEncode(pageDimensionsJson);
     final totalPages = _documentInfo!.totalPages;
     final enableTextSelection = widget.config.enableTextSelection;
+
+    // ✅ FIX 1: Pass sensitivity values ke JavaScript
+    final zoomSensitivityMobile = widget.config.pinchZoomSensitivityMobile;
+    final zoomSensitivityDesktop = widget.config.pinchZoomSensitivityDesktop;
 
     final htmlContent = r'''
 <!DOCTYPE html>
@@ -402,6 +414,10 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       const totalPages = ''' + totalPages.toString() + r''';
       const pageDimensions = ''' + pageDimensionsJsonString + r''';
       const enableTextSelection = ''' + enableTextSelection.toString() + r''';
+      
+      // ✅ FIX 2: Terima sensitivity values dari Flutter
+      const zoomSensitivityMobile = ''' + zoomSensitivityMobile.toString() + r''';
+      const zoomSensitivityDesktop = ''' + zoomSensitivityDesktop.toString() + r''';
 
       let container, virtualScroller;
       let scale = 1.0;
@@ -411,10 +427,12 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
       const placeholders = [];
       const renderingPages = new Set();
+      const renderedPages = new Map(); // ✅ FIX 3: Track rendered pages untuk avoid white screen
 
       // Pinch zoom variables
       let initialPinchDistance = null;
       let initialScale = 1.0;
+      let isZooming = false; // ✅ Track zoom state
 
       function calculateLayout() {
         const baseScale = isMobile ? 1.2 : 1.5;
@@ -544,6 +562,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               }
               
               pageContent.remove();
+              renderedPages.delete(pageNum); // ✅ Remove from tracking
             }
 
             let spinner = placeholder.querySelector('.loading-spinner');
@@ -676,6 +695,9 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           pageNumber.textContent = pageNum + ' / ' + totalPages;
           pageContent.appendChild(pageNumber);
 
+          // ✅ Track rendered page
+          renderedPages.set(pageNum, { scale: scale, rotation: currentRotation });
+
           page.cleanup();
           pdf.destroy();
 
@@ -692,36 +714,55 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         }
       }
 
+      // ✅ FIX 4: Smooth zoom - hanya re-render jika perubahan scale signifikan
       function setZoom(newScale) {
         newScale = Math.max(0.1, Math.min(5.0, newScale));
         if (Math.abs(newScale - scale) < 0.01) return;
 
         const oldScrollRatio = container.scrollTop / container.scrollHeight;
+        const oldScale = scale;
         scale = newScale;
 
         calculateLayout();
 
-        placeholders.forEach(placeholder => {
-          const pageContent = placeholder.querySelector('.page-content');
-          if (pageContent) pageContent.remove();
+        // ✅ Hanya remove pages yang perlu di-re-render (scale change > 20%)
+        const scaleChangePercent = Math.abs((newScale - oldScale) / oldScale);
+        const shouldRerender = scaleChangePercent > 0.2; // Re-render jika zoom change > 20%
 
-          let spinner = placeholder.querySelector('.loading-spinner');
-          if (!spinner) {
-            spinner = document.createElement('div');
-            spinner.className = 'loading-spinner';
-            const spinnerIcon = document.createElement('div');
-            spinnerIcon.className = 'spinner-icon';
-            spinner.appendChild(spinnerIcon);
-            placeholder.appendChild(spinner);
-          } else {
-            spinner.style.display = 'block';
-          }
-        });
+        if (shouldRerender) {
+          placeholders.forEach((placeholder, idx) => {
+            const pageNum = idx + 1;
+            const pageData = renderedPages.get(pageNum);
+            
+            // Hanya remove jika scale berbeda signifikan
+            if (pageData && Math.abs(pageData.scale - scale) / scale > 0.2) {
+              const pageContent = placeholder.querySelector('.page-content');
+              if (pageContent) pageContent.remove();
+              renderedPages.delete(pageNum);
+
+              let spinner = placeholder.querySelector('.loading-spinner');
+              if (!spinner) {
+                spinner = document.createElement('div');
+                spinner.className = 'loading-spinner';
+                const spinnerIcon = document.createElement('div');
+                spinnerIcon.className = 'spinner-icon';
+                spinner.appendChild(spinnerIcon);
+                placeholder.appendChild(spinner);
+              } else {
+                spinner.style.display = 'block';
+              }
+            }
+          });
+        }
 
         requestAnimationFrame(() => {
           container.scrollTop = container.scrollHeight * oldScrollRatio;
           window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
-          updateVisiblePages();
+          
+          // ✅ Delay update untuk smooth experience
+          setTimeout(() => {
+            updateVisiblePages();
+          }, 100);
         });
       }
 
@@ -753,6 +794,8 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }
         });
 
+        renderedPages.clear(); // Clear all rendered pages on rotation
+
         requestAnimationFrame(() => {
           container.scrollTop = container.scrollHeight * oldScrollRatio;
           updateVisiblePages();
@@ -778,23 +821,26 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         container.addEventListener('scroll', () => {
           clearTimeout(scrollTimeout);
           scrollTimeout = setTimeout(() => {
-            updateVisiblePages();
+            if (!isZooming) { // ✅ Jangan update saat zooming
+              updateVisiblePages();
+            }
           }, 50);
         }, { passive: true });
 
-        // Desktop zoom with Ctrl+Wheel
+        // ✅ FIX 3: Desktop zoom dengan sensitivity variable
         container.addEventListener('wheel', (e) => {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
             const delta = -Math.sign(e.deltaY);
-            const newScale = scale + delta * 0.1;
+            const newScale = scale + delta * parseFloat(zoomSensitivityDesktop);
             setZoom(newScale);
           }
         }, { passive: false });
 
-        // Mobile pinch-to-zoom
+        // ✅ FIX 3: Mobile pinch zoom dengan sensitivity variable
         container.addEventListener('touchstart', (e) => {
           if (e.touches.length === 2) {
+            isZooming = true;
             const touch1 = e.touches[0];
             const touch2 = e.touches[1];
             initialPinchDistance = Math.hypot(
@@ -814,13 +860,32 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               touch2.clientX - touch1.clientX,
               touch2.clientY - touch1.clientY
             );
-            const scaleChange = currentDistance / initialPinchDistance;
-            setZoom(initialScale * scaleChange);
+            
+            // ✅ Gunakan sensitivity untuk smooth zoom
+            const distanceDelta = (currentDistance - initialPinchDistance) * parseFloat(zoomSensitivityMobile);
+            const newScale = Math.max(0.1, Math.min(5.0, initialScale + distanceDelta));
+            
+            // Update scale tanpa trigger re-render immediately
+            const oldScrollRatio = container.scrollTop / container.scrollHeight;
+            scale = newScale;
+            calculateLayout();
+            requestAnimationFrame(() => {
+              container.scrollTop = container.scrollHeight * oldScrollRatio;
+            });
           }
         }, { passive: false });
 
         container.addEventListener('touchend', () => {
-          initialPinchDistance = null;
+          if (isZooming) {
+            isZooming = false;
+            initialPinchDistance = null;
+            window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
+            
+            // ✅ Re-render setelah zoom selesai
+            setTimeout(() => {
+              updateVisiblePages();
+            }, 200);
+          }
         }, { passive: true });
 
         window.parent.postMessage({ type: 'viewerReady' }, '*');
@@ -1024,6 +1089,21 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_shouldUseVerticalAppBar) {
+      return Scaffold(
+        body: Row(
+          children: [
+            Expanded(child: _buildBody()),
+            Container(
+              width: 60,
+              color: Colors.black26,
+              child: _buildVerticalAppBar(),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 40,
@@ -1032,12 +1112,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(_documentInfo?.title ?? widget.title),
-            /*
-            if (_documentInfo != null)
-              Text(
-                '${_pageCache.length} cached • ${_documentInfo!.formattedFileSize} • ${_rotationDegrees}°',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),*/
           ],
         ),
         actions: [
@@ -1046,7 +1120,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             onPressed: _toggleDarkMode,
             tooltip: 'Toggle Dark Mode',
           ),
-
           IconButton(
             icon: const Icon(Icons.rotate_right),
             onPressed: _rotateClockwise,
@@ -1054,15 +1127,14 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           ),
           const VerticalDivider(),
           IconButton(
-            padding: EdgeInsets.zero,  // Remove padding
+            padding: EdgeInsets.zero,
             constraints: BoxConstraints(),
             icon: const Icon(Icons.zoom_out),
             onPressed: () => _setZoom(_zoomLevel - 0.3),
           ),
-
           Text('${(_zoomLevel * 100).toInt()}%'),
           IconButton(
-            padding: EdgeInsets.zero,  // Remove padding
+            padding: EdgeInsets.zero,
             constraints: BoxConstraints(),
             icon: const Icon(Icons.zoom_in),
             onPressed: () => _setZoom(_zoomLevel + 0.3),
@@ -1075,19 +1147,64 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     );
   }
 
-  Widget _buildPageNav() {
-    return Row(
+  Widget _buildVerticalAppBar() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.start,
       children: [
         IconButton(
-          icon: const Icon(Icons.chevron_left),
-          padding: EdgeInsets.zero,  // Remove padding
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).pop(),
+          tooltip: 'Back',
+        ),
+        const Divider(height: 1),
+        IconButton(
+          icon: Icon(_isDarkMode ? Icons.light_mode : Icons.dark_mode),
+          onPressed: _toggleDarkMode,
+          tooltip: 'Toggle Dark Mode',
+        ),
+        IconButton(
+          icon: const Icon(Icons.rotate_right),
+          onPressed: _rotateClockwise,
+          tooltip: 'Rotate Right',
+        ),
+        /*const Divider(height: 1),
+        IconButton(
+          padding: EdgeInsets.zero,
+          constraints: BoxConstraints(),
+          icon: const Icon(Icons.zoom_out),
+          onPressed: () => _setZoom(_zoomLevel - 0.3),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Text(
+            '${(_zoomLevel * 100).toInt()}%',
+            style: TextStyle(fontSize: 10),
+          ),
+        ),
+        IconButton(
+          padding: EdgeInsets.zero,
+          constraints: BoxConstraints(),
+          icon: const Icon(Icons.zoom_in),
+          onPressed: () => _setZoom(_zoomLevel + 0.3),
+        ),*/
+        const Divider(height: 1),
+        if (_documentInfo != null) _buildVerticalPageNav(),
+      ],
+    );
+  }
+
+  Widget _buildVerticalPageNav() {
+    return Column(
+      children: [
+        IconButton(
+          icon: const Icon(Icons.keyboard_arrow_up),
+          padding: EdgeInsets.zero,
           constraints: BoxConstraints(),
           onPressed: _currentPage > 1 ? () => _goToPage(_currentPage - 1) : null,
         ),
         SizedBox(
-          width: 40,  // Reduced from 40
+          width: 40,
           child: TextField(
-
             controller: _pageController,
             focusNode: _pageFocusNode,
             textAlign: TextAlign.center,
@@ -1101,10 +1218,9 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               ),
               filled: true,
               fillColor: Colors.white,
-              //border: InputBorder.none,
-              contentPadding: EdgeInsets.zero,  // Remove internal padding
-              isDense: true,  // M
-              constraints: BoxConstraints(maxWidth: 40),  // ake it more compact
+              contentPadding: EdgeInsets.zero,
+              isDense: true,
+              constraints: BoxConstraints(maxWidth: 40),
             ),
             onSubmitted: (value) {
               final page = int.tryParse(value);
@@ -1112,11 +1228,67 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             },
           ),
         ),
-        SizedBox(width: 7,),
-        Text('${_documentInfo!.totalPages}',style: TextStyle(fontSize: 12),),
+        SizedBox(height: 7),
+        Text(
+          '${_documentInfo!.totalPages}',
+          style: TextStyle(fontSize: 12),
+        ),
+        IconButton(
+          icon: const Icon(Icons.keyboard_arrow_down),
+          padding: EdgeInsets.zero,
+          constraints: BoxConstraints(),
+          onPressed: _currentPage < _documentInfo!.totalPages
+              ? () => _goToPage(_currentPage + 1)
+              : null,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPageNav() {
+    return Row(
+      children: [
+        IconButton(
+          icon: const Icon(Icons.chevron_left),
+          padding: EdgeInsets.zero,
+          constraints: BoxConstraints(),
+          onPressed: _currentPage > 1 ? () => _goToPage(_currentPage - 1) : null,
+        ),
+        SizedBox(
+          width: 40,
+          child: TextField(
+            controller: _pageController,
+            focusNode: _pageFocusNode,
+            textAlign: TextAlign.center,
+            keyboardType: TextInputType.number,
+            style: TextStyle(fontSize: 12),
+            cursorHeight: 12,
+            decoration: InputDecoration(
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(4),
+                borderSide: BorderSide.none,
+              ),
+              filled: true,
+              fillColor: Colors.white,
+              contentPadding: EdgeInsets.zero,
+              isDense: true,
+              constraints: BoxConstraints(maxWidth: 40),
+            ),
+            onSubmitted: (value) {
+              final page = int.tryParse(value);
+              if (page != null) _goToPage(page);
+            },
+          ),
+        ),
+        SizedBox(width: 7),
+        Text(
+          '${_documentInfo!.totalPages}',
+          style: TextStyle(fontSize: 12),
+        ),
         IconButton(
           icon: const Icon(Icons.chevron_right),
-
+          padding: EdgeInsets.zero,
+          constraints: BoxConstraints(),
           onPressed: _currentPage < _documentInfo!.totalPages
               ? () => _goToPage(_currentPage + 1)
               : null,

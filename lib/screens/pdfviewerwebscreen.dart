@@ -10,6 +10,8 @@ import 'dart:typed_data';
 import '../services/pdf_api_service.dart';
 import '../models/document_info.dart';
 
+/// perfect! Beta4
+
 class PdfViewerConfig {
   final int prefetchRadius;
   final bool enableDebugLogging;
@@ -234,7 +236,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
     final totalPages = _documentInfo!.totalPages;
     final enableTextSelection = widget.config.enableTextSelection;
 
-    // ✅ FIX 1: Pass sensitivity values ke JavaScript
     final zoomSensitivityMobile = widget.config.pinchZoomSensitivityMobile;
     final zoomSensitivityDesktop = widget.config.pinchZoomSensitivityDesktop;
 
@@ -415,7 +416,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
       const pageDimensions = ''' + pageDimensionsJsonString + r''';
       const enableTextSelection = ''' + enableTextSelection.toString() + r''';
       
-      // ✅ FIX 2: Terima sensitivity values dari Flutter
       const zoomSensitivityMobile = ''' + zoomSensitivityMobile.toString() + r''';
       const zoomSensitivityDesktop = ''' + zoomSensitivityDesktop.toString() + r''';
 
@@ -427,12 +427,15 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
       const placeholders = [];
       const renderingPages = new Set();
-      const renderedPages = new Map(); // ✅ FIX 3: Track rendered pages untuk avoid white screen
+      const renderedPages = new Map();
+      
+      // ✅ Cache PDF data and parsed objects in JavaScript
+      const pdfDataCache = new Map();
+      const parsedPages = new Map();
 
-      // Pinch zoom variables
       let initialPinchDistance = null;
       let initialScale = 1.0;
-      let isZooming = false; // ✅ Track zoom state
+      let isZooming = false;
 
       function calculateLayout() {
         const baseScale = isMobile ? 1.2 : 1.5;
@@ -562,7 +565,14 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               }
               
               pageContent.remove();
-              renderedPages.delete(pageNum); // ✅ Remove from tracking
+              renderedPages.delete(pageNum);
+            }
+
+            if (parsedPages.has(pageNum)) {
+              const { pdf, page } = parsedPages.get(pageNum);
+              page.cleanup();
+              pdf.destroy();
+              parsedPages.delete(pageNum);
             }
 
             let spinner = placeholder.querySelector('.loading-spinner');
@@ -601,14 +611,44 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           const hasContent = placeholder?.querySelector('.page-content');
           
           if (!hasContent && !renderingPages.has(pageNum)) {
-            window.parent.postMessage({ 
-              type: 'requestPage', 
-              page: pageNum 
-            }, '*');
+            if (pdfDataCache.has(pageNum)) {
+              const cachedData = pdfDataCache.get(pageNum);
+              renderPage(pageNum, cachedData);
+            } else {
+              window.parent.postMessage({ 
+                type: 'requestPage', 
+                page: pageNum 
+              }, '*');
+            }
           }
         }
 
         cleanupOffscreenPages();
+      }
+
+      async function loadPdfPage(pageNum, pdfData) {
+        if (parsedPages.has(pageNum)) {
+          return parsedPages.get(pageNum);
+        }
+
+        const binary = atob(pdfData);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+
+        const loadingTask = pdfjsLib.getDocument({ 
+          data: bytes,
+          useSystemFonts: true,
+        });
+
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+
+        const pdfObj = { pdf, page };
+        parsedPages.set(pageNum, pdfObj);
+        
+        return pdfObj;
       }
 
       async function renderPage(pageNum, pdfData) {
@@ -621,26 +661,12 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           return;
         }
 
-        if (placeholder.querySelector('.page-content')) {
-          return;
-        }
+        const oldContent = placeholder.querySelector('.page-content');
 
         renderingPages.add(pageNum);
 
         try {
-          const binary = atob(pdfData);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-          }
-
-          const loadingTask = pdfjsLib.getDocument({ 
-            data: bytes,
-            useSystemFonts: true,
-          });
-
-          const pdf = await loadingTask.promise;
-          const page = await pdf.getPage(1);
+          const { page } = await loadPdfPage(pageNum, pdfData);
 
           const pageContent = document.createElement('div');
           pageContent.className = 'page-content';
@@ -685,21 +711,21 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             pageContent.appendChild(textLayerDiv);
           }
 
-          const spinner = placeholder.querySelector('.loading-spinner');
-          if (spinner) spinner.style.display = 'none';
-
-          placeholder.appendChild(pageContent);
-
           const pageNumber = document.createElement('div');
           pageNumber.className = 'page-number';
           pageNumber.textContent = pageNum + ' / ' + totalPages;
           pageContent.appendChild(pageNumber);
 
-          // ✅ Track rendered page
-          renderedPages.set(pageNum, { scale: scale, rotation: currentRotation });
+          const spinner = placeholder.querySelector('.loading-spinner');
+          if (spinner) spinner.style.display = 'none';
 
-          page.cleanup();
-          pdf.destroy();
+          placeholder.appendChild(pageContent);
+
+          if (oldContent) {
+            oldContent.remove();
+          }
+
+          renderedPages.set(pageNum, { scale: scale, rotation: currentRotation });
 
         } catch (error) {
           console.error('Error rendering page ' + pageNum + ':', error);
@@ -707,6 +733,11 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           const errorDiv = document.createElement('div');
           errorDiv.style.cssText = 'color: #e74c3c; text-align: center; padding: 20px;';
           errorDiv.textContent = 'Error loading page ' + pageNum;
+          
+          if (oldContent) {
+            oldContent.remove();
+          }
+          
           placeholder.appendChild(errorDiv);
           
         } finally {
@@ -714,7 +745,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         }
       }
 
-      // ✅ FIX 4: Smooth zoom - hanya re-render jika perubahan scale signifikan
       function setZoom(newScale) {
         newScale = Math.max(0.1, Math.min(5.0, newScale));
         if (Math.abs(newScale - scale) < 0.01) return;
@@ -725,32 +755,14 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
         calculateLayout();
 
-        // ✅ Hanya remove pages yang perlu di-re-render (scale change > 20%)
+        const pagesToRerender = [];
         const scaleChangePercent = Math.abs((newScale - oldScale) / oldScale);
-        const shouldRerender = scaleChangePercent > 0.2; // Re-render jika zoom change > 20%
+        const shouldRerender = scaleChangePercent > 0.2;
 
         if (shouldRerender) {
-          placeholders.forEach((placeholder, idx) => {
-            const pageNum = idx + 1;
-            const pageData = renderedPages.get(pageNum);
-            
-            // Hanya remove jika scale berbeda signifikan
-            if (pageData && Math.abs(pageData.scale - scale) / scale > 0.2) {
-              const pageContent = placeholder.querySelector('.page-content');
-              if (pageContent) pageContent.remove();
-              renderedPages.delete(pageNum);
-
-              let spinner = placeholder.querySelector('.loading-spinner');
-              if (!spinner) {
-                spinner = document.createElement('div');
-                spinner.className = 'loading-spinner';
-                const spinnerIcon = document.createElement('div');
-                spinnerIcon.className = 'spinner-icon';
-                spinner.appendChild(spinnerIcon);
-                placeholder.appendChild(spinner);
-              } else {
-                spinner.style.display = 'block';
-              }
+          renderedPages.forEach((pageData, pageNum) => {
+            if (Math.abs(pageData.scale - scale) / scale > 0.2) {
+              pagesToRerender.push(pageNum);
             }
           });
         }
@@ -759,9 +771,17 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           container.scrollTop = container.scrollHeight * oldScrollRatio;
           window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
           
-          // ✅ Delay update untuk smooth experience
           setTimeout(() => {
-            updateVisiblePages();
+            if (!isZooming) {
+              const visiblePages = getVisiblePageRange();
+              
+              visiblePages.forEach(pageNum => {
+                if (shouldRerender && pagesToRerender.includes(pageNum) && pdfDataCache.has(pageNum)) {
+                  const cachedData = pdfDataCache.get(pageNum);
+                  renderPage(pageNum, cachedData);
+                }
+              });
+            }
           }, 100);
         });
       }
@@ -777,9 +797,12 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
 
         calculateLayout();
 
-        placeholders.forEach(placeholder => {
+        placeholders.forEach((placeholder, idx) => {
           const pageContent = placeholder.querySelector('.page-content');
           if (pageContent) pageContent.remove();
+
+          const pageNum = idx + 1;
+          renderedPages.delete(pageNum);
 
           let spinner = placeholder.querySelector('.loading-spinner');
           if (!spinner) {
@@ -794,11 +817,16 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }
         });
 
-        renderedPages.clear(); // Clear all rendered pages on rotation
-
         requestAnimationFrame(() => {
           container.scrollTop = container.scrollHeight * oldScrollRatio;
-          updateVisiblePages();
+          
+          const visiblePages = getVisiblePageRange();
+          visiblePages.forEach(pageNum => {
+            if (pdfDataCache.has(pageNum)) {
+              const cachedData = pdfDataCache.get(pageNum);
+              renderPage(pageNum, cachedData);
+            }
+          });
         });
       }
 
@@ -821,13 +849,12 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         container.addEventListener('scroll', () => {
           clearTimeout(scrollTimeout);
           scrollTimeout = setTimeout(() => {
-            if (!isZooming) { // ✅ Jangan update saat zooming
+            if (!isZooming) {
               updateVisiblePages();
             }
           }, 50);
         }, { passive: true });
 
-        // ✅ FIX 3: Desktop zoom dengan sensitivity variable
         container.addEventListener('wheel', (e) => {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
@@ -837,7 +864,6 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
           }
         }, { passive: false });
 
-        // ✅ FIX 3: Mobile pinch zoom dengan sensitivity variable
         container.addEventListener('touchstart', (e) => {
           if (e.touches.length === 2) {
             isZooming = true;
@@ -861,11 +887,9 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
               touch2.clientY - touch1.clientY
             );
             
-            // ✅ Gunakan sensitivity untuk smooth zoom
             const distanceDelta = (currentDistance - initialPinchDistance) * parseFloat(zoomSensitivityMobile);
             const newScale = Math.max(0.1, Math.min(5.0, initialScale + distanceDelta));
             
-            // Update scale tanpa trigger re-render immediately
             const oldScrollRatio = container.scrollTop / container.scrollHeight;
             scale = newScale;
             calculateLayout();
@@ -881,9 +905,17 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
             initialPinchDistance = null;
             window.parent.postMessage({ type: 'zoomChanged', zoom: scale }, '*');
             
-            // ✅ Re-render setelah zoom selesai
             setTimeout(() => {
-              updateVisiblePages();
+              const visiblePages = getVisiblePageRange();
+              visiblePages.forEach(pageNum => {
+                if (pdfDataCache.has(pageNum)) {
+                  const pageData = renderedPages.get(pageNum);
+                  if (!pageData || Math.abs(pageData.scale - scale) / scale > 0.2) {
+                    const cachedData = pdfDataCache.get(pageNum);
+                    renderPage(pageNum, cachedData);
+                  }
+                }
+              });
             }, 200);
           }
         }, { passive: true });
@@ -896,6 +928,7 @@ class _PdfViewerWebScreenState extends State<PdfViewerWebScreen> {
         const data = event.data;
 
         if (data.type === 'renderPage') {
+          pdfDataCache.set(data.pageNumber, data.pageData);
           await renderPage(data.pageNumber, data.pageData);
         } else if (data.type === 'setZoom') {
           setZoom(data.scale);
